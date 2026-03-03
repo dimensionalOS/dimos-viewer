@@ -1,0 +1,251 @@
+name: Build & Publish dimos-viewer
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # for GitHub Releases
+
+env:
+  RUST_TOOLCHAIN: "1.92.0"
+
+jobs:
+  # ---------------------------------------------------------------
+  # Rust Tests
+  # ---------------------------------------------------------------
+  test-rust:
+    name: Rust Tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libvulkan-dev \
+            mesa-vulkan-drivers libxkbcommon-x11-0
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run Rust tests
+        run: cargo test -p custom_callback
+
+  # ---------------------------------------------------------------
+  # Build Wheels (matrix: linux-x64, linux-arm64, macos-arm64)
+  # ---------------------------------------------------------------
+  build-wheel:
+    name: Build Wheel (${{ matrix.platform }})
+    needs: [test-rust]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            maturin_args: "--compatibility manylinux_2_28"
+          - platform: linux-arm64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            maturin_args: "--compatibility manylinux_2_28"
+          - platform: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            maturin_args: ""
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install maturin
+        run: pip install maturin>=1.8.1
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            libxkbcommon-x11-0
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build wheels with maturin
+        run: |
+          maturin build \
+            --release \
+            --manifest-path examples/rust/custom_callback/Cargo.toml \
+            --target ${{ matrix.target }} \
+            --interpreter python3.10 python3.11 python3.12 python3.13 \
+            ${{ matrix.maturin_args }} \
+            --out dist/
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform }}
+          path: dist/*.whl
+
+  # ---------------------------------------------------------------
+  # Python Tests (run after building the native wheel)
+  # ---------------------------------------------------------------
+  test-python:
+    name: Python Tests (py${{ matrix.python-version }})
+    needs: [build-wheel]
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download linux-x64 wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x64
+          path: dist/
+
+      - name: Install wheel and test dependencies
+        run: |
+          # Find the wheel matching our Python version
+          WHEEL=$(ls dist/*cp$(echo ${{ matrix.python-version }} | tr -d '.')*.whl | head -1)
+          pip install "$WHEEL"
+          pip install pytest
+
+      - name: Run Python tests
+        run: |
+          pytest examples/rust/custom_callback/tests/ -v
+
+      - name: Verify CLI entry point
+        run: |
+          which dimos-viewer
+          python -c "from dimos_viewer import __version__; print(f'dimos-viewer v{__version__}')"
+          python -c "from dimos_viewer import _find_viewer_binary; print(f'Binary: {_find_viewer_binary()}')"
+
+  # ---------------------------------------------------------------
+  # Publish to PyPI (on tag push only)
+  # ---------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [test-python, build-wheel]
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: pypi
+    permissions:
+      id-token: write  # for trusted publishing
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: List wheels
+        run: ls -la dist/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install maturin
+        run: pip install maturin>=1.8.1
+
+      - name: Publish to PyPI
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          maturin upload --skip-existing dist/*.whl
+
+  # ---------------------------------------------------------------
+  # GitHub Release (on tag push only)
+  # ---------------------------------------------------------------
+  github-release:
+    name: GitHub Release
+    needs: [build-wheel]
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          generate_release_notes: true
