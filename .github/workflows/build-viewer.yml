@@ -1,0 +1,256 @@
+# Build & publish dimos-viewer wheels.
+#
+# Modelled on Rerun's reusable_build_and_upload_wheels / reusable_publish_wheels
+# but adapted for the dimos-viewer binary package:
+#   - Uses standard GitHub runners (no self-hosted)
+#   - Uses GitHub Artifacts instead of GCS for wheel storage
+#   - Builds with `maturin build` (bindings = "bin") instead of rerun_py
+#
+# Triggers:
+#   PR → main          build + test
+#   push → main        build + test
+#   tag v*             build + test + publish to PyPI + GitHub Release
+
+name: Build & Publish dimos-viewer
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUST_TOOLCHAIN: "1.92.0"
+  PYTHON_VERSION: "3.10"
+  PACKAGE_DIR: examples/rust/custom_callback
+
+# ---------------------------------------------------------------------------
+jobs:
+
+  # -------------------------------------------------------------------
+  # 1. Rust checks & tests
+  # -------------------------------------------------------------------
+  check:
+    name: Cargo check & test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libvulkan-dev \
+            mesa-vulkan-drivers libxkbcommon-x11-0
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+
+      - run: cargo check -p custom_callback
+      - run: cargo test  -p custom_callback
+
+  # -------------------------------------------------------------------
+  # 2. Build wheels (one job per platform)
+  #    Mirrors the matrix approach from reusable_build_and_upload_wheels.yml
+  # -------------------------------------------------------------------
+  build-wheel:
+    name: Build wheel (${{ matrix.platform }})
+    needs: [check]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            compatibility: manylinux_2_28
+          - platform: linux-arm64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            compatibility: manylinux_2_28
+          - platform: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            compatibility: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install maturin
+        run: pip install maturin>=1.8.1
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libvulkan-dev \
+            mesa-vulkan-drivers libxkbcommon-x11-0
+
+      - name: Install cross-compilation toolchain (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-wheel-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build wheel
+        run: |
+          COMPAT_ARG=""
+          if [ -n "${{ matrix.compatibility }}" ]; then
+            COMPAT_ARG="--compatibility ${{ matrix.compatibility }}"
+          fi
+          maturin build \
+            --release \
+            --manifest-path "${{ env.PACKAGE_DIR }}/Cargo.toml" \
+            --target "${{ matrix.target }}" \
+            $COMPAT_ARG \
+            --out dist/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: dist/*.whl
+
+  # -------------------------------------------------------------------
+  # 3. Test installed wheels
+  # -------------------------------------------------------------------
+  test-wheel:
+    name: Test wheel (py${{ matrix.python-version }})
+    needs: [build-wheel]
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download linux-x64 wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-linux-x64
+          path: dist/
+
+      - name: Install wheel + test deps
+        run: |
+          pip install dist/*.whl
+          pip install pytest
+
+      - name: Run Python tests
+        run: pytest "${{ env.PACKAGE_DIR }}/tests/" -v
+
+      - name: Verify CLI entry point
+        run: |
+          which dimos-viewer
+          python -c "from dimos_viewer import __version__; print(f'dimos-viewer v{__version__}')"
+          python -c "from dimos_viewer import _find_viewer_binary; print(f'binary: {_find_viewer_binary()}')"
+
+  # -------------------------------------------------------------------
+  # 4. Publish to PyPI  (tag v* only)
+  #    Mirrors reusable_publish_wheels.yml but pulls from GitHub Artifacts
+  #    instead of GCS, then uploads via `maturin upload`.
+  # -------------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [test-wheel]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    environment: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist/
+
+      - run: ls -la dist/
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install maturin
+        run: pip install maturin>=1.8.1
+
+      - name: Publish to PyPI
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: maturin upload --skip-existing dist/*.whl
+
+  # -------------------------------------------------------------------
+  # 5. GitHub Release  (tag v* only)
+  # -------------------------------------------------------------------
+  github-release:
+    name: GitHub Release
+    needs: [publish-pypi]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          generate_release_notes: true
