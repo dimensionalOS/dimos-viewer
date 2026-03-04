@@ -92,7 +92,7 @@ jobs:
           - platform: linux-x64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            container: quay.io/pypa/manylinux_2_28_x86_64
+            container: ghcr.io/rerun-io/ci_docker:0.17.0
             compatibility: manylinux_2_28
           - platform: macos-arm64
             os: macos-14
@@ -107,44 +107,22 @@ jobs:
       - uses: actions/checkout@v4
 
       # --- Linux (inside manylinux container) ---
-      - name: Install system dependencies (manylinux)
-        if: matrix.container != ''
-        run: |
-          dnf update -y
-          dnf install -y \
-            make automake gcc gcc-c++ kernel-devel \
-            cmake \
-            gtk3-devel \
-            xcb-util-renderutil-devel \
-            xcb-util-devel \
-            xcb-util-wm-devel \
-            libxkbcommon-devel \
-            openssl-devel \
-            fontconfig-devel \
-            freetype-devel \
-            python3-pip
-          dnf clean all
+      # System deps already installed in ghcr.io/rerun-io/ci_docker:0.17.0
 
-      - name: Install Rust (manylinux)
+      - name: Set up Rust (manylinux)
         if: matrix.container != ''
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          . "$HOME/.cargo/env"
           rustup install
           rustup show active-toolchain
 
       - name: Install maturin (manylinux)
         if: matrix.container != ''
         run: |
-          . "$HOME/.cargo/env"
-          python3 -m pip install --upgrade pip
-          python3 -m pip install maturin>=1.8.1
+          pip3 install maturin>=1.8.1
 
       - name: Build wheel (manylinux)
         if: matrix.container != ''
         run: |
-          . "$HOME/.cargo/env"
           maturin build \
             --release \
             --manifest-path "${{ env.PACKAGE_DIR }}/Cargo.toml" \
