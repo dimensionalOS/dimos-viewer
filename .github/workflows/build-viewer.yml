@@ -145,16 +145,12 @@ jobs:
           rustup install
           rustup show active-toolchain
 
-      - name: Set up Python 3.10 (manylinux)
-        if: matrix.container != ''
-        run: |
-          echo "/opt/python/cp310-cp310/bin" >> "$GITHUB_PATH"
-
       - name: Install maturin (manylinux)
         if: matrix.container != ''
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install maturin>=1.8.1
+          /opt/python/cp312-cp312/bin/python3 -m pip install --upgrade pip
+          /opt/python/cp312-cp312/bin/python3 -m pip install maturin>=1.8.1
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
 
       - name: Build wheel (manylinux)
         if: matrix.container != ''
