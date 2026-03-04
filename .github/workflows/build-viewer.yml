@@ -148,18 +148,18 @@ jobs:
       - name: Install maturin (manylinux)
         if: matrix.container != ''
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install maturin>=1.8.1
+          /opt/python/cp310-cp310/bin/python3 -m pip install --upgrade pip
+          /opt/python/cp310-cp310/bin/python3 -m pip install maturin>=1.8.1
 
       - name: Build wheel (manylinux)
         if: matrix.container != ''
         run: |
-          maturin build \
+          /opt/python/cp310-cp310/bin/maturin build \
             --release \
             --manifest-path "${{ env.PACKAGE_DIR }}/Cargo.toml" \
             --target "${{ matrix.target }}" \
             --compatibility "${{ matrix.compatibility }}" \
-            -i python3 \
+            -i /opt/python/cp310-cp310/bin/python3 \
             --out dist/
 
       # --- macOS (native runner) ---
