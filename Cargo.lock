@@ -2227,7 +2227,6 @@ name = "custom_callback"
 version = "0.30.0-alpha.1+dev"
 dependencies = [
  "bincode",
- "clap",
  "mimalloc",
  "parking_lot",
  "rerun",
@@ -3107,6 +3106,19 @@ dependencies = [
  "block-buffer",
  "crypto-common",
  "subtle",
+]
+
+[[package]]
+name = "dimos-viewer"
+version = "0.30.0-alpha.1+dev"
+dependencies = [
+ "bincode",
+ "clap",
+ "mimalloc",
+ "parking_lot",
+ "rerun",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

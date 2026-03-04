@@ -1,32 +1,32 @@
 [package]
-name = "custom_callback"
+name = "dimos-viewer"
 version = "0.30.0-alpha.1+dev"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 publish = false
+description = "DimOS Interactive Viewer — custom Rerun viewer with LCM click-to-navigate"
 
 [[bin]]
-name = "custom_callback_viewer"
+name = "dimos-viewer"
 path = "src/viewer.rs"
 
-[[bin]]
-name = "custom_callback_app"
-path = "src/app.rs"
+[lib]
+name = "dimos_viewer"
+path = "src/lib.rs"
 
 [features]
 default = []
-
-# Turn on if you want to share analytics with Rerun (e.g. callstacks on crashes).
 analytics = ["rerun/analytics"]
 
 [dependencies]
-rerun = { path = "../../../crates/top/rerun", default-features = false, features = [
+rerun = { path = "../crates/top/rerun", default-features = false, features = [
   "native_viewer",
   "run",
   "server",
 ] }
 
+clap = { workspace = true, features = ["derive"] }
 bincode.workspace = true
 mimalloc.workspace = true
 parking_lot.workspace = true

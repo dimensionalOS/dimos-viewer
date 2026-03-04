@@ -37,7 +37,7 @@ defaults:
 
 env:
   PYTHON_VERSION: "3.10"
-  PACKAGE_DIR: examples/rust/custom_callback
+  PACKAGE_DIR: dimos
 
 # ---------------------------------------------------------------------------
 jobs:
@@ -74,8 +74,8 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
 
-      - run: cargo check -p custom_callback
-      - run: cargo test  -p custom_callback
+      - run: cargo check -p dimos-viewer
+      - run: cargo test  -p dimos-viewer
 
   # -------------------------------------------------------------------
   # 2. Build wheels per platform
