@@ -83,7 +83,7 @@ jobs:
   #    macOS: native runner
   # -------------------------------------------------------------------
   build-wheel:
-    name: Build wheel (${{ matrix.platform }})
+    name: Build wheel (${{ matrix.platform }}-py${{ matrix.python-version }})
     needs: [check]
     timeout-minutes: 60
     strategy:
@@ -91,11 +91,43 @@ jobs:
       matrix:
         include:
           - platform: linux-x64
+            python-version: "3.10"
+            python-tag: cp310-cp310
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            compatibility: manylinux_2_28
+          - platform: linux-x64
+            python-version: "3.11"
+            python-tag: cp311-cp311
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            compatibility: manylinux_2_28
+          - platform: linux-x64
+            python-version: "3.12"
+            python-tag: cp312-cp312
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             container: quay.io/pypa/manylinux_2_28_x86_64
             compatibility: manylinux_2_28
           - platform: macos-arm64
+            python-version: "3.10"
+            python-tag: cp310-cp310
+            os: macos-14
+            target: aarch64-apple-darwin
+            container: ""
+            compatibility: ""
+          - platform: macos-arm64
+            python-version: "3.11"
+            python-tag: cp311-cp311
+            os: macos-14
+            target: aarch64-apple-darwin
+            container: ""
+            compatibility: ""
+          - platform: macos-arm64
+            python-version: "3.12"
+            python-tag: cp312-cp312
             os: macos-14
             target: aarch64-apple-darwin
             container: ""
@@ -148,9 +180,9 @@ jobs:
       - name: Install maturin (manylinux)
         if: matrix.container != ''
         run: |
-          /opt/python/cp312-cp312/bin/python3 -m pip install --upgrade pip
-          /opt/python/cp312-cp312/bin/python3 -m pip install maturin>=1.8.1
-          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+          /opt/python/${{ matrix.python-tag }}/bin/python3 -m pip install --upgrade pip
+          /opt/python/${{ matrix.python-tag }}/bin/python3 -m pip install maturin>=1.8.1
+          echo "/opt/python/${{ matrix.python-tag }}/bin" >> "$GITHUB_PATH"
 
       - name: Build wheel (manylinux)
         if: matrix.container != ''
@@ -173,7 +205,7 @@ jobs:
         if: matrix.container == ''
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python-version }}"
 
       - name: Install maturin (macOS)
         if: matrix.container == ''
@@ -193,28 +225,32 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.platform }}
+          name: wheel-${{ matrix.platform }}-py${{ matrix.python-version }}
           path: dist/*.whl
 
   # -------------------------------------------------------------------
   # 3. Test installed wheels
   # -------------------------------------------------------------------
   test-wheel:
-    name: Test wheel install
+    name: Test wheel (py${{ matrix.python-version }})
     needs: [build-wheel]
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python-version }}"
 
       - name: Download linux-x64 wheel
         uses: actions/download-artifact@v4
         with:
-          name: wheel-linux-x64
+          name: wheel-linux-x64-py${{ matrix.python-version }}
           path: dist/
 
       - name: Install wheel
