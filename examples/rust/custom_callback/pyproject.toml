@@ -1,0 +1,40 @@
+[build-system]
+requires = ["maturin>=1.8.1"]
+build-backend = "maturin"
+
+[project]
+name = "dimos-viewer"
+version = "0.30.0a1"
+description = "Interactive Rerun viewer for DimOS with click-to-navigate support"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT OR Apache-2.0"}
+authors = [{name = "Dimensional Inc.", email = "engineering@dimensional.com"}]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Robotics",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+homepage = "https://github.com/dimensionalOS/dimos-viewer"
+repository = "https://github.com/dimensionalOS/dimos-viewer"
+issues = "https://github.com/dimensionalOS/dimos-viewer/issues"
+
+[tool.maturin]
+# Build the Rust binary and package it for distribution.
+# "bin" mode: maturin compiles the [[bin]] target and installs it as a console script.
+bindings = "bin"
+manifest-path = "Cargo.toml"
+locked = false
+# Include the Python wrapper package alongside the binary
+python-packages = ["dimos_viewer"]
+# Strip binaries to reduce wheel size
+strip = true
