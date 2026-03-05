@@ -1,7 +1,7 @@
-//! LCM (Lightweight Communications and Marshalling) publisher for click events.
+//! LCM (Lightweight Communications and Marshalling) publisher for click events and twist commands.
 //!
-//! Publishes `geometry_msgs/PointStamped` messages over UDP multicast,
-//! following the same convention as RViz's `/clicked_point` topic.
+//! Publishes `geometry_msgs/PointStamped` and `geometry_msgs/TwistStamped` messages over UDP multicast,
+//! following the same convention as RViz's `/clicked_point` and `/cmd_vel` topics.
 //!
 //! ## LCM Wire Protocol (short message)
 //! ```text
@@ -18,6 +18,17 @@
 //!
 //! Point:
 //!   [8B x: f64] [8B y: f64] [8B z: f64]
+//! ```
+//!
+//! ## TwistStamped Binary Layout
+//! ```text
+//! [8B fingerprint hash] [Header (no hash)] [Twist (no hash)]
+//!
+//! Header: (same as above)
+//!
+//! Twist:
+//!   Vector3 linear:  [8B x: f64] [8B y: f64] [8B z: f64]
+//!   Vector3 angular: [8B x: f64] [8B y: f64] [8B z: f64]
 //! ```
 
 use std::net::UdpSocket;
@@ -39,6 +50,16 @@ const LCM_MAGIC_SHORT: u32 = 0x4c433032;
 /// - PointStamped:  base=0xf012413a2c8028c2 + Header + Point → rot → 0x9cd764738ea629af
 const POINT_STAMPED_HASH: u64 = 0x9cd764738ea629af;
 
+/// Pre-computed fingerprint hash for `geometry_msgs/TwistStamped`.
+///
+/// Computed from the recursive hash chain:
+/// - Time:          base=0xde1d24a3a8ecb648 → rot → 0xbc3a494751d96c91
+/// - Header:        base=0xdbb33f5b4c19b8ea + Time → rot → 0x2fdb11453be64af7
+/// - Vector3:       base=0x573f2fdd2f76508f → rot → 0xae7e5fba5eeca11e
+/// - Twist:         base=0x3a4144772922add7 + Vector3 + Vector3 → rot → 0x2e7c07d7cdf7e027
+/// - TwistStamped:  base=0xf01245422c7b28c2 + Header + Twist → rot → 0x9cd2bcbe6cb2a7c0
+const TWIST_STAMPED_HASH: u64 = 0x9cd2bcbe6cb2a7c0;
+
 /// A click event with world-space coordinates and entity info.
 #[derive(Debug, Clone)]
 pub struct ClickEvent {
@@ -53,7 +74,21 @@ pub struct ClickEvent {
     pub timestamp_nsec: i32,
 }
 
-/// Encodes a `PointStamped` LCM message (with fingerprint hash prefix).
+/// A velocity command (maps to geometry_msgs/TwistStamped).
+#[derive(Debug, Clone)]
+pub struct TwistCommand {
+    pub linear_x: f64,   // forward/backward
+    pub linear_y: f64,   // strafe left/right
+    pub linear_z: f64,   // up/down (unused for ground robots)
+    pub angular_x: f64,  // roll (unused)
+    pub angular_y: f64,  // pitch (unused)
+    pub angular_z: f64,  // yaw left/right
+    pub frame_id: String,
+    pub timestamp_sec: i32,
+    pub timestamp_nsec: i32,
+}
+
+/// Encodes a \`PointStamped\` LCM message (with fingerprint hash prefix).
 ///
 /// Binary layout:
 /// - 8 bytes: fingerprint hash (big-endian i64)
@@ -92,9 +127,53 @@ pub fn encode_point_stamped(event: &ClickEvent) -> Vec<u8> {
     buf
 }
 
+/// Encodes a \`TwistStamped\` LCM message (with fingerprint hash prefix).
+///
+/// Binary layout:
+/// - 8 bytes: fingerprint hash (big-endian u64)
+/// - Header (no hash): seq(i32) + stamp.sec(i32) + stamp.nsec(i32) + frame_id(len-prefixed string)
+/// - Twist (no hash): linear(Vector3: x,y,z f64) + angular(Vector3: x,y,z f64)
+pub fn encode_twist_stamped(cmd: &TwistCommand) -> Vec<u8> {
+    let frame_id_bytes = cmd.frame_id.as_bytes();
+    // LCM string encoding: i32 length (including null terminator) + bytes + null
+    let string_len = (frame_id_bytes.len() + 1) as i32;
+
+    // Calculate total size:
+    // 8 (hash) + 4 (seq) + 4 (sec) + 4 (nsec) + 4 (string_len) + frame_id_bytes + 1 (null) + 48 (6 doubles)
+    let total_size = 8 + 4 + 4 + 4 + 4 + frame_id_bytes.len() + 1 + 48;
+    let mut buf = Vec::with_capacity(total_size);
+
+    // Fingerprint hash (big-endian)
+    buf.extend_from_slice(&TWIST_STAMPED_HASH.to_be_bytes());
+
+    // Header._encodeNoHash:
+    //   seq (i32, big-endian) — always 0 for twist commands
+    buf.extend_from_slice(&0i32.to_be_bytes());
+    //   stamp.sec (i32)
+    buf.extend_from_slice(&cmd.timestamp_sec.to_be_bytes());
+    //   stamp.nsec (i32)
+    buf.extend_from_slice(&cmd.timestamp_nsec.to_be_bytes());
+    //   frame_id: string = i32 length (incl null) + bytes + null
+    buf.extend_from_slice(&string_len.to_be_bytes());
+    buf.extend_from_slice(frame_id_bytes);
+    buf.push(0); // null terminator
+
+    // Twist._encodeNoHash:
+    // Vector3 linear:
+    buf.extend_from_slice(&cmd.linear_x.to_be_bytes());
+    buf.extend_from_slice(&cmd.linear_y.to_be_bytes());
+    buf.extend_from_slice(&cmd.linear_z.to_be_bytes());
+    // Vector3 angular:
+    buf.extend_from_slice(&cmd.angular_x.to_be_bytes());
+    buf.extend_from_slice(&cmd.angular_y.to_be_bytes());
+    buf.extend_from_slice(&cmd.angular_z.to_be_bytes());
+
+    buf
+}
+
 /// Builds a complete LCM UDP packet (short message format).
 ///
-/// Format: `[4B magic] [4B seqno] [channel\0] [payload]`
+/// Format: \`[4B magic] [4B seqno] [channel\0] [payload]\`
 pub fn build_lcm_packet(channel: &str, payload: &[u8], seq: u32) -> Vec<u8> {
     let channel_bytes = channel.as_bytes();
     let total = 4 + 4 + channel_bytes.len() + 1 + payload.len();
@@ -109,7 +188,7 @@ pub fn build_lcm_packet(channel: &str, payload: &[u8], seq: u32) -> Vec<u8> {
     pkt
 }
 
-/// LCM publisher that sends PointStamped messages via UDP multicast.
+/// LCM publisher that sends PointStamped and TwistStamped messages via UDP multicast.
 pub struct LcmPublisher {
     socket: UdpSocket,
     seq: AtomicU32,
@@ -119,8 +198,9 @@ pub struct LcmPublisher {
 impl LcmPublisher {
     /// Create a new LCM publisher.
     ///
-    /// `channel` is the LCM channel name, e.g.
-    /// `"/clicked_point#geometry_msgs.PointStamped"`.
+    /// \`channel\` is the LCM channel name, e.g.
+    /// \`"/clicked_point#geometry_msgs.PointStamped"\` or 
+    /// \`"/cmd_vel#geometry_msgs.TwistStamped"\`.
     pub fn new(channel: String) -> std::io::Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         // TTL=0 means local machine only; TTL=1 for same subnet
@@ -139,6 +219,14 @@ impl LcmPublisher {
         let packet = build_lcm_packet(&self.channel, &payload, seq);
         self.socket.send_to(&packet, LCM_MULTICAST_ADDR)
     }
+
+    /// Publish a twist command as a TwistStamped LCM message.
+    pub fn publish_twist(&self, cmd: &TwistCommand) -> std::io::Result<usize> {
+        let payload = encode_twist_stamped(cmd);
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let packet = build_lcm_packet(&self.channel, &payload, seq);
+        self.socket.send_to(&packet, LCM_MULTICAST_ADDR)
+    }
 }
 
 impl std::fmt::Debug for LcmPublisher {
@@ -150,7 +238,7 @@ impl std::fmt::Debug for LcmPublisher {
     }
 }
 
-/// Create a `ClickEvent` from position, entity path, and a millisecond timestamp.
+/// Create a \`ClickEvent\` from position, entity path, and a millisecond timestamp.
 pub fn click_event_from_ms(
     position: [f32; 3],
     entity_path: &str,
@@ -168,7 +256,7 @@ pub fn click_event_from_ms(
     }
 }
 
-/// Create a `ClickEvent` from position and entity path, using the current time.
+/// Create a \`ClickEvent\` from position and entity path, using the current time.
 pub fn click_event_now(position: [f32; 3], entity_path: &str) -> ClickEvent {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -178,6 +266,28 @@ pub fn click_event_now(position: [f32; 3], entity_path: &str) -> ClickEvent {
         y: position[1] as f64,
         z: position[2] as f64,
         entity_path: entity_path.to_string(),
+        timestamp_sec: now.as_secs() as i32,
+        timestamp_nsec: now.subsec_nanos() as i32,
+    }
+}
+
+/// Create a \`TwistCommand\` from velocity values using current timestamp.
+pub fn twist_command_now(
+    linear: [f64; 3],
+    angular: [f64; 3],
+    frame_id: &str,
+) -> TwistCommand {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    TwistCommand {
+        linear_x: linear[0],
+        linear_y: linear[1],
+        linear_z: linear[2],
+        angular_x: angular[0],
+        angular_y: angular[1],
+        angular_z: angular[2],
+        frame_id: frame_id.to_string(),
         timestamp_sec: now.as_secs() as i32,
         timestamp_nsec: now.subsec_nanos() as i32,
     }
@@ -201,6 +311,76 @@ mod tests {
                 .wrapping_add(header_hash)
                 .wrapping_add(point_hash));
         assert_eq!(ps_hash, POINT_STAMPED_HASH);
+    }
+
+    #[test]
+    fn test_twist_stamped_fingerprint() {
+        // Verify our pre-computed hash matches the LCM spec computation
+        fn rot(h: u64) -> u64 {
+            (h.wrapping_shl(1)).wrapping_add((h >> 63) & 1)
+        }
+        let time_hash = rot(0xde1d24a3a8ecb648);
+        let header_hash = rot(0xdbb33f5b4c19b8ea_u64.wrapping_add(time_hash));
+        let vector3_hash = rot(0x573f2fdd2f76508f);
+        let twist_hash = rot(0x3a4144772922add7_u64
+            .wrapping_add(vector3_hash)
+            .wrapping_add(vector3_hash));
+        let ts_hash =
+            rot(0xf01245422c7b28c2_u64
+                .wrapping_add(header_hash)
+                .wrapping_add(twist_hash));
+        assert_eq!(ts_hash, TWIST_STAMPED_HASH);
+    }
+
+    #[test]
+    fn test_encode_twist_stamped_matches_python() {
+        // Test with known values verified against Python reference
+        let cmd = TwistCommand {
+            linear_x: 0.5,
+            linear_y: 0.0,
+            linear_z: 0.0,
+            angular_x: 0.0,
+            angular_y: 0.0,
+            angular_z: 0.3,
+            frame_id: "base_link".to_string(),
+            timestamp_sec: 1234,
+            timestamp_nsec: 5678,
+        };
+
+        let encoded = encode_twist_stamped(&cmd);
+
+        // Expected from Python LCM encoding (82 bytes, verified):
+        let expected_hex = "9cd2bcbe6cb2a7c000000000000004d20000162e0000000a626173655f6c696e6b003fe000000000000000000000000000000000000000000000000000000000000000000000000000003fd3333333333333";
+        let expected: Vec<u8> = (0..expected_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&expected_hex[i..i + 2], 16).unwrap())
+            .collect();
+
+        assert_eq!(encoded, expected, "Encoded bytes must match Python LCM output");
+        assert_eq!(encoded.len(), 82, "Encoded length must be 82 bytes");
+    }
+
+    #[test]
+    fn test_encode_twist_stamped_empty_frame_id() {
+        let cmd = TwistCommand {
+            linear_x: 0.0,
+            linear_y: 0.0,
+            linear_z: 0.0,
+            angular_x: 0.0,
+            angular_y: 0.0,
+            angular_z: 0.0,
+            frame_id: String::new(),
+            timestamp_sec: 0,
+            timestamp_nsec: 0,
+        };
+        let encoded = encode_twist_stamped(&cmd);
+
+        // Hash(8) + seq(4) + sec(4) + nsec(4) + strlen(4) + null(1) + 6*f64(48) = 73
+        assert_eq!(encoded.len(), 73);
+
+        // String length field should be 1 (just the null terminator)
+        let str_len = i32::from_be_bytes([encoded[20], encoded[21], encoded[22], encoded[23]]);
+        assert_eq!(str_len, 1);
     }
 
     #[test]
@@ -297,9 +477,25 @@ mod tests {
     }
 
     #[test]
+    fn test_twist_command_now() {
+        let cmd = twist_command_now([1.0, 0.0, 0.0], [0.0, 0.0, 0.5], "base_link");
+        assert_eq!(cmd.linear_x, 1.0);
+        assert_eq!(cmd.angular_z, 0.5);
+        assert_eq!(cmd.frame_id, "base_link");
+        let now_sec = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i32;
+        assert!((cmd.timestamp_sec - now_sec).abs() < 10);
+    }
+
+    #[test]
     fn test_lcm_publisher_creation() {
         let publisher = LcmPublisher::new("/clicked_point#geometry_msgs.PointStamped".to_string());
         assert!(publisher.is_ok());
+        
+        let publisher_twist = LcmPublisher::new("/cmd_vel#geometry_msgs.TwistStamped".to_string());
+        assert!(publisher_twist.is_ok());
     }
 
     #[test]

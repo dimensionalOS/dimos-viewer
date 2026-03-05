@@ -3,8 +3,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use dimos_viewer::interaction::{LcmPublisher, click_event_from_ms};
-use rerun::external::{eframe, re_crash_handler, re_grpc_server, re_log, re_memory, re_viewer};
+use dimos_viewer::interaction::{LcmPublisher, KeyboardHandler, click_event_from_ms};
+use rerun::external::{eframe, egui, re_crash_handler, re_grpc_server, re_log, re_memory, re_viewer};
 
 #[global_allocator]
 static GLOBAL: re_memory::AccountingAllocator<mimalloc::MiMalloc> =
@@ -50,6 +50,65 @@ struct Args {
     expect_data_soon: bool,
 }
 
+/// Wraps re_viewer::App to add keyboard control interception.
+struct DimosApp {
+    inner: re_viewer::App,
+    keyboard: KeyboardHandler,
+}
+
+impl DimosApp {
+    fn new(
+        inner: re_viewer::App, 
+        keyboard: KeyboardHandler,
+    ) -> Self {
+        Self {
+            inner,
+            keyboard,
+        }
+    }
+}
+
+impl eframe::App for DimosApp {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Process keyboard input before delegating to Rerun
+        let keyboard_active = self.keyboard.process(ui.ctx());
+
+        // Show keyboard status overlay if active
+        if keyboard_active {
+            egui::Area::new("keyboard_status".into())
+                .fixed_pos(egui::pos2(10.0, 10.0))
+                .show(ui.ctx(), |ui| {
+                    ui.visuals_mut().override_text_color = Some(egui::Color32::GREEN);
+                    ui.label("🎮 Keyboard Control Active (WASD + QE, Shift=Fast, Space=Stop)");
+                });
+        }
+
+        // Delegate to Rerun's main ui method
+        self.inner.ui(ui, frame);
+    }
+
+    // Delegate all other methods to inner re_viewer::App
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.inner.save(storage);
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        self.inner.clear_color(visuals)
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        self.inner.persist_egui_memory()
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        self.inner.auto_save_interval()
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.inner.raw_input_hook(ctx, raw_input);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -71,6 +130,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lcm_publisher = LcmPublisher::new(LCM_CHANNEL.to_string())
         .expect("Failed to create LCM publisher");
     re_log::info!("LCM publisher created for channel: {LCM_CHANNEL}");
+
+    // Create keyboard handler
+    let keyboard_handler = KeyboardHandler::new()
+        .expect("Failed to create keyboard handler");
+    re_log::info!("Keyboard handler initialized for WASD controls");
 
     // State for debouncing and rapid click detection
     let last_click_time = Rc::new(RefCell::new(Instant::now()));
@@ -188,7 +252,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             rerun_app.add_log_receiver(rx_log);
 
-            Ok(Box::new(rerun_app))
+            let dimos_app = DimosApp::new(rerun_app, keyboard_handler);
+
+            Ok(Box::new(dimos_app))
         }),
     )?;
 
