@@ -111,6 +111,27 @@ jobs:
             target: x86_64-unknown-linux-gnu
             container: quay.io/pypa/manylinux_2_28_x86_64
             compatibility: manylinux_2_28
+          - platform: linux-arm64
+            python-version: "3.10"
+            python-tag: cp310-cp310
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            compatibility: manylinux_2_28
+          - platform: linux-arm64
+            python-version: "3.11"
+            python-tag: cp311-cp311
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            compatibility: manylinux_2_28
+          - platform: linux-arm64
+            python-version: "3.12"
+            python-tag: cp312-cp312
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            compatibility: manylinux_2_28
           - platform: macos-arm64
             python-version: "3.10"
             python-tag: cp310-cp310
@@ -247,10 +268,11 @@ jobs:
         with:
           python-version: "${{ matrix.python-version }}"
 
-      - name: Download linux-x64 wheel
+      - name: Download linux wheel
         uses: actions/download-artifact@v4
         with:
-          name: wheel-linux-x64-py${{ matrix.python-version }}
+          pattern: wheel-linux-*-py${{ matrix.python-version }}
+          merge-multiple: true
           path: dist/
 
       - name: Install wheel
