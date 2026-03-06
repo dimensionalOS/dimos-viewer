@@ -58,7 +58,7 @@ struct DimosApp {
 
 impl DimosApp {
     fn new(
-        inner: re_viewer::App, 
+        inner: re_viewer::App,
         keyboard: KeyboardHandler,
     ) -> Self {
         Self {
@@ -71,17 +71,10 @@ impl DimosApp {
 impl eframe::App for DimosApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Process keyboard input before delegating to Rerun
-        let keyboard_active = self.keyboard.process(ui.ctx());
+        self.keyboard.process(ui.ctx());
 
-        // Show keyboard status overlay if active
-        if keyboard_active {
-            egui::Area::new("keyboard_status".into())
-                .fixed_pos(egui::pos2(10.0, 10.0))
-                .show(ui.ctx(), |ui| {
-                    ui.visuals_mut().override_text_color = Some(egui::Color32::GREEN);
-                    ui.label("🎮 Keyboard Control Active (WASD + QE, Shift=Fast, Space=Stop)");
-                });
-        }
+        // Always draw the keyboard HUD overlay (dims when inactive)
+        self.keyboard.draw_overlay(ui.ctx());
 
         // Delegate to Rerun's main ui method
         self.inner.ui(ui, frame);
@@ -134,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create keyboard handler
     let keyboard_handler = KeyboardHandler::new()
         .expect("Failed to create keyboard handler");
-    re_log::info!("Keyboard handler initialized for WASD controls");
+    re_log::info!("Keyboard handler initialized for WASD controls on /cmd_vel");
 
     // State for debouncing and rapid click detection
     let last_click_time = Rc::new(RefCell::new(Instant::now()));
