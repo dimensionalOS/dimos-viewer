@@ -271,8 +271,7 @@ jobs:
       - name: Download linux wheel
         uses: actions/download-artifact@v4
         with:
-          pattern: wheel-linux-*-py${{ matrix.python-version }}
-          merge-multiple: true
+          name: wheel-linux-x64-py${{ matrix.python-version }}
           path: dist/
 
       - name: Install wheel
