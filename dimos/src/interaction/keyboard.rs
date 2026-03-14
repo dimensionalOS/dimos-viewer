@@ -150,7 +150,7 @@ impl KeyboardHandler {
             screen_rect.max.y - overlay_height - bottom_timeline_offset,
         );
 
-        egui::Area::new("keyboard_hud".into())
+        let area_response = egui::Area::new("keyboard_hud".into())
             .default_pos(default_pos)
             .movable(true)
             .order(egui::Order::Foreground)
@@ -176,7 +176,12 @@ impl KeyboardHandler {
                     response.response.rect,
                     ui.id().with("wasd_click"),
                     egui::Sense::click(),
-                ).on_hover_cursor(egui::CursorIcon::Default);
+                );
+
+                // Force arrow cursor over the entire overlay (overrides label I-beam)
+                if click_response.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Default);
+                }
 
                 // Toggle engaged state on click
                 if click_response.clicked() {
@@ -194,8 +199,22 @@ impl KeyboardHandler {
                         if self.engaged { "ENGAGED" } else { "DISENGAGED" }
                     );
                 }
-            });
+            })
+            .response;
 
+        // Disengage when clicking anywhere outside the overlay
+        if self.engaged
+            && !ctx.rect_contains_pointer(area_response.layer_id, area_response.interact_rect)
+            && ctx.input(|i| i.pointer.primary_clicked())
+        {
+            self.engaged = false;
+            if let Err(e) = self.publish_stop() {
+                re_log::warn!("Failed to send stop on outside click: {e:?}");
+            }
+            self.state.reset();
+            self.was_active = false;
+            re_log::info!("Keyboard teleop DISENGAGED (clicked outside)");
+        }
     }
 
     fn draw_hud_content(&self, ui: &mut egui::Ui) {
