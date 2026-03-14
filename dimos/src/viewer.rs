@@ -73,7 +73,7 @@ impl eframe::App for DimosApp {
         // Process keyboard input before delegating to Rerun
         self.keyboard.process(ui.ctx());
 
-        // Always draw the keyboard HUD overlay (dims when inactive)
+        // Draw the keyboard HUD overlay (click to engage/disengage)
         self.keyboard.draw_overlay(ui.ctx());
 
         // Delegate to Rerun's main ui method
@@ -132,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create keyboard handler
     let keyboard_handler = KeyboardHandler::new()
         .expect("Failed to create keyboard handler");
-    re_log::info!("Keyboard handler initialized for WASD controls on /cmd_vel");
+
 
     // State for debouncing and rapid click detection
     let last_click_time = Rc::new(RefCell::new(Instant::now()));
