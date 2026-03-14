@@ -140,13 +140,12 @@ impl KeyboardHandler {
     /// Clickable: clicking the overlay toggles engaged state.
     pub fn draw_overlay(&mut self, ctx: &egui::Context) {
         let screen_rect = ctx.content_rect();
-        // Default position: bottom-right of the 3D viewport area
-        let overlay_width = 140.0;
+        // Default position: bottom-left, just above the timeline bar
         let overlay_height = 160.0;
-        let right_panel_offset = 320.0;
+        let left_margin = 12.0;
         let bottom_timeline_offset = 120.0;
         let default_pos = egui::pos2(
-            screen_rect.max.x - overlay_width - right_panel_offset,
+            screen_rect.min.x + left_margin,
             screen_rect.max.y - overlay_height - bottom_timeline_offset,
         );
 
