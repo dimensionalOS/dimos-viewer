@@ -194,10 +194,6 @@ impl KeyboardHandler {
                         self.state.reset();
                         self.was_active = false;
                     }
-                    re_log::info!(
-                        "Keyboard teleop {}",
-                        if self.engaged { "ENGAGED" } else { "DISENGAGED" }
-                    );
                 }
             })
             .response;
@@ -213,7 +209,6 @@ impl KeyboardHandler {
             }
             self.state.reset();
             self.was_active = false;
-            re_log::info!("Keyboard teleop DISENGAGED (clicked outside)");
         }
     }
 
