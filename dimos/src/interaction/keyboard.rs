@@ -150,6 +150,7 @@ impl KeyboardHandler {
         );
 
         let area_response = egui::Area::new("keyboard_hud".into())
+            .pivot(egui::Align2::LEFT_BOTTOM)
             .default_pos(default_pos)
             .movable(true)
             .order(egui::Order::Foreground)
