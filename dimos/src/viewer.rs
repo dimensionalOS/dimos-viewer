@@ -1,25 +1,15 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
 use clap::Parser;
-use dimos_viewer::interaction::{LcmPublisher, KeyboardHandler, click_event_from_ms};
+use dimos_viewer::interaction::KeyboardHandler;
 use rerun::external::{eframe, egui, re_crash_handler, re_grpc_server, re_log, re_memory, re_viewer};
 
 #[global_allocator]
 static GLOBAL: re_memory::AccountingAllocator<mimalloc::MiMalloc> =
     re_memory::AccountingAllocator::new(mimalloc::MiMalloc);
 
-/// LCM channel for click events (follows RViz convention)
-const LCM_CHANNEL: &str = "/clicked_point#geometry_msgs.PointStamped";
-/// Minimum time between click events (debouncing)
-const CLICK_DEBOUNCE_MS: u64 = 100;
-/// Maximum rapid clicks to log as warning
-const RAPID_CLICK_THRESHOLD: usize = 5;
 /// Default gRPC listen port (9877 to avoid conflict with stock Rerun on 9876)
 const DEFAULT_PORT: u16 = 9877;
 
-/// DimOS Interactive Viewer — a custom Rerun viewer with LCM click-to-navigate.
+/// DimOS Interactive Viewer — a custom Rerun viewer with WASD keyboard teleop.
 ///
 /// Accepts the same CLI flags as the stock `rerun` binary so it can be spawned
 /// seamlessly via `rerun_bindings.spawn(executable_name="dimos-viewer")`.
@@ -73,7 +63,7 @@ impl eframe::App for DimosApp {
         // Process keyboard input before delegating to Rerun
         self.keyboard.process(ui.ctx());
 
-        // Always draw the keyboard HUD overlay (dims when inactive)
+        // Draw the keyboard HUD overlay (click to engage/disengage)
         self.keyboard.draw_overlay(ui.ctx());
 
         // Delegate to Rerun's main ui method
@@ -124,19 +114,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         re_grpc_server::shutdown::never(),
     );
 
-    // Create LCM publisher for click events
-    let lcm_publisher = LcmPublisher::new(LCM_CHANNEL.to_string())
-        .expect("Failed to create LCM publisher");
-    re_log::info!("LCM publisher created for channel: {LCM_CHANNEL}");
-
     // Create keyboard handler
     let keyboard_handler = KeyboardHandler::new()
         .expect("Failed to create keyboard handler");
     re_log::info!("Keyboard handler initialized for WASD controls on /cmd_vel");
-
-    // State for debouncing and rapid click detection
-    let last_click_time = Rc::new(RefCell::new(Instant::now()));
-    let rapid_click_count = Rc::new(RefCell::new(0usize));
 
     let mut native_options = re_viewer::native::eframe_options(None);
     native_options.viewport = native_options
@@ -151,88 +132,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let startup_options = re_viewer::StartupOptions {
         memory_limit,
-        on_event: Some(Rc::new({
-            let last_click_time = last_click_time.clone();
-            let rapid_click_count = rapid_click_count.clone();
-
-            move |event: re_viewer::ViewerEvent| {
-                if let re_viewer::ViewerEventKind::SelectionChange { items } = event.kind {
-                    let mut has_position = false;
-                    let mut no_position_count = 0;
-
-                    for item in items {
-                        match item {
-                            re_viewer::SelectionChangeItem::Entity {
-                                entity_path,
-                                view_name: _,
-                                position: Some(pos),
-                                ..
-                            } => {
-                                has_position = true;
-
-                                // Debouncing
-                                let now = Instant::now();
-                                let elapsed = now.duration_since(*last_click_time.borrow());
-
-                                if elapsed < Duration::from_millis(CLICK_DEBOUNCE_MS) {
-                                    let mut count = rapid_click_count.borrow_mut();
-                                    *count += 1;
-                                    if *count == RAPID_CLICK_THRESHOLD {
-                                        re_log::warn!(
-                                            "Rapid click detected ({} clicks within {}ms)",
-                                            RAPID_CLICK_THRESHOLD,
-                                            CLICK_DEBOUNCE_MS
-                                        );
-                                    }
-                                    continue;
-                                } else {
-                                    *rapid_click_count.borrow_mut() = 0;
-                                }
-                                *last_click_time.borrow_mut() = now;
-
-                                let timestamp_ms = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis() as u64;
-
-                                // Build click event and publish via LCM
-                                let click = click_event_from_ms(
-                                    [pos.x, pos.y, pos.z],
-                                    &entity_path.to_string(),
-                                    timestamp_ms,
-                                );
-
-                                match lcm_publisher.publish(&click) {
-                                    Ok(_) => {
-                                        re_log::debug!(
-                                            "LCM click event published: entity={}, pos=({:.2}, {:.2}, {:.2})",
-                                            entity_path,
-                                            pos.x,
-                                            pos.y,
-                                            pos.z
-                                        );
-                                    }
-                                    Err(err) => {
-                                        re_log::error!("Failed to publish LCM click event: {err:?}");
-                                    }
-                                }
-                            }
-                            re_viewer::SelectionChangeItem::Entity { position: None, .. } => {
-                                no_position_count += 1;
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    if !has_position && no_position_count > 0 {
-                        re_log::trace!(
-                            "Selection change without position data ({no_position_count} items). \
-                             This is normal for hover/keyboard navigation."
-                        );
-                    }
-                }
-            }
-        })),
         ..Default::default()
     };
 
