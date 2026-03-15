@@ -81,19 +81,19 @@ Examples:
     // Place most of the help last, as that is most visible in the terminal.
     after_long_help = ENVIRONMENT_VARIABLES_AND_EXAMPLES
 )]
-struct Args {
+pub struct Args {
     // Note: arguments are sorted lexicographically for nicer `--help` message.
     //
     // We also use `long_help` on some arguments for more compact formatting.
     //
     #[command(subcommand)]
-    command: Option<Command>,
+    pub command: Option<Command>,
 
     /// What bind address IP to use.
     ///
     /// `::` will listen on all interfaces, IPv6 and IPv4.
     #[clap(long, default_value = "0.0.0.0")]
-    bind: IpAddr,
+    pub bind: IpAddr,
 
     #[clap(
         long,
@@ -102,7 +102,7 @@ struct Args {
 When this limit is reached, Rerun will drop the oldest data.
 Example: `16GB` or `50%` (of system total)."
     )]
-    memory_limit: String,
+    pub memory_limit: String,
 
     #[clap(
         long,
@@ -112,11 +112,11 @@ The server buffers log messages for the benefit of late-arriving viewers.
 When this limit is reached, Rerun will drop the oldest data.
 Example: `16GB` or `50%` (of system total)."
     )]
-    server_memory_limit: String,
+    pub server_memory_limit: String,
 
     /// If true, play back the most recent data first when new clients connect.
     #[clap(long)]
-    newest_first: bool,
+    pub newest_first: bool,
 
     #[clap(
         long,
@@ -127,26 +127,26 @@ When persisted, the state will be stored at the following locations:
 - macOS: `/Users/UserName/Library/Application Support/rerun`
 - Windows: `C:\Users\UserName\AppData\Roaming\rerun`"
     )]
-    persist_state: bool,
+    pub persist_state: bool,
 
     /// What port do we listen to for SDKs to connect to over gRPC.
     // Default is `re_grpc_server::DEFAULT_SERVER_PORT`, can't use symbollically if `server` feature is disabled
     #[clap(long, default_value_t = 9876)]
-    port: u16,
+    pub port: u16,
 
     /// Start with the puffin profiler running.
     #[clap(long)]
-    profile: bool,
+    pub profile: bool,
 
     /// Stream incoming log events to an .rrd file at the given path.
     #[clap(long)]
-    save: Option<String>,
+    pub save: Option<String>,
 
     /// Take a screenshot of the app and quit.
     /// We use this to generate screenshots of our examples.
     /// Useful together with `--window-size`.
     #[clap(long)]
-    screenshot_to: Option<std::path::PathBuf>,
+    pub screenshot_to: Option<std::path::PathBuf>,
 
     /// This will host a web-viewer over HTTP, and a gRPC server,
     /// unless one or more URIs are provided that can be viewed directly in the web viewer.
@@ -157,14 +157,14 @@ When persisted, the state will be stored at the following locations:
     // TODO(andreas): The Rust/Python APIs deprecated `serve_web` and instead encourage separate usage of `rec.serve_grpc()` + `rerun::serve_web_viewer()` instead.
     // It's worth considering doing the same here.
     #[clap(long)]
-    serve_web: bool,
+    pub serve_web: bool,
 
     /// This will host a gRPC server.
     ///
     /// The server will act like a proxy, listening for incoming connections from
     /// logging SDKs, and forwarding it to Rerun viewers.
     #[clap(long)]
-    serve_grpc: bool,
+    pub serve_grpc: bool,
 
     /// Do not attempt to start a new server, instead try to connect to an existing one.
     ///
@@ -176,7 +176,7 @@ When persisted, the state will be stored at the following locations:
     /// The default is `rerun+http://127.0.0.1:9876/proxy`.
     #[clap(long)]
     #[expect(clippy::option_option)] // Tri-state: none, --connect, --connect <url>.
-    connect: Option<Option<String>>,
+    pub connect: Option<Option<String>>,
 
     /// This is a hint that we expect a recording to stream in very soon.
     ///
@@ -186,7 +186,7 @@ When persisted, the state will be stored at the following locations:
     /// instead of showing it directly.
     /// This ensures that it won't blink for a few frames before switching to the recording.
     #[clap(long)]
-    expect_data_soon: bool,
+    pub expect_data_soon: bool,
 
     /// Tail .rrd files, waiting for new data to be appended after reaching EOF.
     ///
@@ -194,7 +194,7 @@ When persisted, the state will be stored at the following locations:
     /// With this flag, the viewer will keep watching for new data, which is useful for live streaming
     /// from a writer process.
     #[clap(long)]
-    follow: bool,
+    pub follow: bool,
 
     /// The number of compute threads to use.
     ///
@@ -207,7 +207,7 @@ When persisted, the state will be stored at the following locations:
         short = 'j',
         default_value = "-2", // save some CPU for the main thread and the rest of the users system
     )]
-    threads: i32,
+    pub threads: i32,
 
     #[clap(long_help = r"Any combination of:
 - A gRPC url to a Rerun server
@@ -217,11 +217,11 @@ When persisted, the state will be stored at the following locations:
 - A path to an image or mesh, or any other file that Rerun can load (see https://www.rerun.io/docs/reference/data-loaders/overview)
 
 If no arguments are given, a server will be hosted which a Rerun SDK can connect to.")]
-    url_or_paths: Vec<String>,
+    pub url_or_paths: Vec<String>,
 
     /// Print version and quit.
     #[clap(long)]
-    version: bool,
+    pub version: bool,
 
     /// Start the viewer in the browser (instead of locally).
     ///
@@ -229,26 +229,26 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     ///
     /// This implies `--serve-web`.
     #[clap(long)]
-    web_viewer: bool,
+    pub web_viewer: bool,
 
     /// What port do we listen to for hosting the web viewer over HTTP.
     /// A port of 0 will pick a random port.
     // Default is `re_web_viewer_server::DEFAULT_WEB_VIEWER_SERVER_PORT`, can't use symbollically if `web_viewer` feature is disabled
     #[clap(long, default_value_t = 9090)]
-    web_viewer_port: u16,
+    pub web_viewer_port: u16,
 
     /// Hide the normal Rerun welcome screen.
     #[clap(long)]
-    hide_welcome_screen: bool,
+    pub hide_welcome_screen: bool,
 
     /// Detach Rerun Viewer process from the application process.
     #[clap(long)]
-    detach_process: bool,
+    pub detach_process: bool,
 
     /// Set the screen resolution (in logical points), e.g. "1920x1080".
     /// Useful together with `--screenshot-to`.
     #[clap(long)]
-    window_size: Option<String>,
+    pub window_size: Option<String>,
 
     /// Override the default graphics backend and for a specific one instead.
     ///
@@ -265,7 +265,7 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     // Note that we don't compile with DX12 right now, but we could (we don't since this adds permutation and wgpu still has some issues with it).
     // GL could be enabled on MacOS via `angle` but given prior issues with ANGLE this seems to be a bad idea!
     #[clap(long)]
-    renderer: Option<String>,
+    pub renderer: Option<String>,
 
     /// Overwrites hardware acceleration option for video decoding.
     ///
@@ -287,7 +287,7 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     ///   Should use a hardware decoder.
     ///   If no hardware decoder is present, this may cause decoding to fail.
     #[clap(long, verbatim_doc_comment)]
-    video_decoder: Option<String>,
+    pub video_decoder: Option<String>,
 
     // ----------------------------------------------------------------------------
     // Debug-options:
@@ -297,7 +297,7 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     ///
     /// Fails if no messages are received, or if no messages are received within a dozen or so seconds.
     #[clap(long)]
-    test_receive: bool,
+    pub test_receive: bool,
 }
 
 impl Args {
@@ -729,7 +729,7 @@ where
     }
 }
 
-fn run_impl(
+pub fn run_impl(
     _main_thread_token: crate::MainThreadToken,
     _build_info: re_build_info::BuildInfo,
     _call_source: CallSource,
@@ -880,7 +880,7 @@ fn run_impl(
 #[cfg(feature = "native_viewer")]
 #[expect(clippy::too_many_arguments)]
 #[allow(clippy::allow_attributes, unused_variables)]
-fn start_native_viewer(
+pub fn start_native_viewer(
     args: &Args,
     url_or_paths: Vec<String>,
     _main_thread_token: re_viewer::MainThreadToken,
@@ -990,7 +990,7 @@ fn start_native_viewer(
 }
 
 #[cfg(feature = "native_viewer")]
-fn native_startup_options_from_args(args: &Args) -> anyhow::Result<re_viewer::StartupOptions> {
+pub fn native_startup_options_from_args(args: &Args) -> anyhow::Result<re_viewer::StartupOptions> {
     re_tracing::profile_function!();
 
     let video_decoder_hw_acceleration = args.video_decoder.as_ref().and_then(|s| match s.parse() {
@@ -1453,7 +1453,7 @@ fn stream_to_rrd_on_disk(
 }
 
 /// Describes how to handle URLs passed on the CLI.
-struct UrlParamProcessingConfig {
+pub struct UrlParamProcessingConfig {
     data_sources_from_http_urls: bool,
     data_sources_from_redap_datasets: bool,
     data_source_from_filepaths: bool,
@@ -1483,7 +1483,7 @@ impl UrlParamProcessingConfig {
     }
 
     #[allow(clippy::allow_attributes, dead_code)] // May be unused depending on feature flags.
-    fn native_viewer() -> Self {
+    pub fn native_viewer() -> Self {
         // Native viewer passes everything on to the viewer unchanged.
         Self {
             data_sources_from_http_urls: false,
@@ -1494,7 +1494,7 @@ impl UrlParamProcessingConfig {
 }
 
 /// Log receivers created from URLs or path parameters that were passed in on the CLI.
-struct ReceiversFromUrlParams {
+pub struct ReceiversFromUrlParams {
     /// Log receivers that we want to hook up to a connection or viewer.
     log_receivers: Vec<LogReceiver>,
 
@@ -1700,4 +1700,378 @@ fn record_cli_command_analytics(args: &Args) {
         detach_process: *detach_process,
         test_receive: *test_receive,
     });
+}
+
+// --- DimOS extension: App wrapper support ---
+
+/// A function that wraps a `re_viewer::App` into a custom `Box<dyn eframe::App>`.
+/// Used by dimos-viewer to inject keyboard teleop and other behaviors.
+pub type AppWrapper = Box<dyn FnOnce(re_viewer::App) -> Result<Box<dyn re_viewer::external::eframe::App>, Box<dyn std::error::Error + Send + Sync>> + Send>;
+
+/// Like [`run`], but accepts an optional `app_wrapper` callback that wraps the
+/// viewer App before it is handed to eframe. When `app_wrapper` is `None`,
+/// behavior is identical to stock Rerun.
+///
+/// This is the dimos-viewer integration point: the wrapper injects keyboard
+/// teleop (DimosApp) while preserving all stock Rerun CLI handling.
+pub fn run_with_app_wrapper<I, T>(
+    main_thread_token: crate::MainThreadToken,
+    build_info: re_build_info::BuildInfo,
+    call_source: CallSource,
+    args: I,
+    app_wrapper: Option<AppWrapper>,
+) -> anyhow::Result<u8>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    #[cfg(feature = "native_viewer")]
+    re_memory::accounting_allocator::turn_on_tracking_if_env_var(
+        re_viewer::env_vars::RERUN_TRACK_ALLOCATIONS,
+    );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if cfg!(feature = "perf_telemetry") && re_log::env_var_is_truthy("TELEMETRY_ENABLED") {
+        eprintln!("Disabling crash handler because of perf_telemetry/TELEMETRY_ENABLED");
+    } else {
+        re_crash_handler::install_crash_handlers(build_info.clone());
+    }
+
+    #[expect(unsafe_code)]
+    unsafe {
+        std::env::set_var("OTEL_SERVICE_NAME", "rerun");
+    }
+
+    use clap::Parser as _;
+    let mut args = Args::parse_from(args);
+
+    #[cfg(feature = "analytics")]
+    record_cli_command_analytics(&args);
+
+    initialize_thread_pool(args.threads);
+
+    if args.web_viewer {
+        args.serve_web = true;
+    }
+
+    if args.version {
+        println!("{build_info}");
+        println!(
+            "Video features: {}",
+            re_video::enabled_features().iter().join(" ")
+        );
+        return Ok(0);
+    }
+
+    #[cfg(feature = "native_viewer")]
+    let profiler = run_profiler(&args);
+
+    let tokio_runtime = initialize_tokio_runtime(args.threads)?;
+    let _tokio_guard = tokio_runtime.enter();
+
+    let res = if let Some(command) = args.command {
+        match command {
+            #[cfg(feature = "auth")]
+            Command::Auth(cmd) => cmd.run(tokio_runtime.handle()).map_err(Into::into),
+
+            #[cfg(feature = "analytics")]
+            Command::Analytics(analytics) => analytics.run().map_err(Into::into),
+
+            Command::Manual => {
+                let man = Args::generate_markdown_manual();
+                let web_header = unindent::unindent(
+                    "\
+                    ---
+                    title: ⌨️ CLI manual
+                    order: 1150
+                    ---\
+                    ",
+                );
+                println!("{web_header}\n\n{man}");
+                Ok(())
+            }
+
+            #[cfg(feature = "data_loaders")]
+            Command::Mcap(mcap) => mcap.run(),
+
+            #[cfg(feature = "native_viewer")]
+            Command::Reset => re_viewer::reset_viewer_persistence(),
+
+            Command::Rrd(rrd) => rrd.run(),
+
+            #[cfg(feature = "oss_server")]
+            Command::Server(server) => tokio_runtime.block_on(server.run_async()),
+        }
+    } else {
+        run_impl_with_wrapper(
+            main_thread_token,
+            build_info,
+            call_source,
+            args,
+            tokio_runtime.handle(),
+            #[cfg(feature = "native_viewer")]
+            profiler,
+            app_wrapper,
+        )
+    };
+
+    match res {
+        Ok(_) => Ok(0),
+        Err(err)
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::AddrInUse) =>
+        {
+            re_log::warn!("{err}");
+            Ok(1)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Like `run_impl` but passes an `app_wrapper` to the native viewer path.
+fn run_impl_with_wrapper(
+    _main_thread_token: crate::MainThreadToken,
+    _build_info: re_build_info::BuildInfo,
+    _call_source: CallSource,
+    args: Args,
+    tokio_runtime_handle: &tokio::runtime::Handle,
+    #[cfg(feature = "native_viewer")] profiler: re_tracing::Profiler,
+    app_wrapper: Option<AppWrapper>,
+) -> anyhow::Result<()> {
+    let connection_registry = re_redap_client::ConnectionRegistry::new_with_stored_credentials();
+
+    let server_addr = std::net::SocketAddr::new(args.bind, args.port);
+
+    #[cfg(feature = "server")]
+    let server_options = re_sdk::ServerOptions {
+        playback_behavior: re_sdk::PlaybackBehavior::from_newest_first(args.newest_first),
+        memory_limit: {
+            re_memory::MemoryLimit::parse(args.server_memory_limit.as_str())
+                .map_err(|err| anyhow::format_err!("Bad --server-memory-limit: {err}"))?
+        },
+    };
+
+    #[allow(clippy::allow_attributes, unused_mut)]
+    let mut url_or_paths = args.url_or_paths.clone();
+
+    #[cfg(feature = "server")]
+    if let Some(url) = args.connect.clone() {
+        let url = url.unwrap_or_else(|| format!("rerun+http://{server_addr}/proxy"));
+        if let Err(err) = url.as_str().parse::<re_uri::RedapUri>() {
+            anyhow::bail!("expected `/proxy` endpoint: {err}");
+        }
+        url_or_paths.push(url);
+    }
+
+    if args.test_receive || args.save.is_some() {
+        let receivers = ReceiversFromUrlParams::new(
+            url_or_paths,
+            &UrlParamProcessingConfig::convert_everything_to_data_sources(),
+            &connection_registry,
+            None,
+            args.follow,
+        )?;
+        save_or_test_receive(
+            args.save,
+            receivers,
+            #[cfg(feature = "server")]
+            server_addr,
+            #[cfg(feature = "server")]
+            server_options,
+        )
+    } else if args.serve_grpc {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "server")] {
+                let receivers = ReceiversFromUrlParams::new(
+                    url_or_paths,
+                    &UrlParamProcessingConfig::convert_everything_to_data_sources(),
+                    &connection_registry,
+                    None,
+                    args.follow,
+                )?;
+                serve_grpc(
+                    receivers,
+                    tokio_runtime_handle,
+                    server_addr,
+                    server_options,
+                )
+            } else {
+                Err(anyhow::anyhow!(
+                    "rerun-cli must be compiled with the 'server' feature enabled"
+                ))
+            }
+        }
+    } else if args.serve_web {
+        cfg_if::cfg_if! {
+            if #[cfg(not(feature = "server"))] {
+                Err(anyhow::anyhow!(
+                    "Can't host server - rerun was not compiled with the 'server' feature"
+                ))
+            } else if #[cfg(not(feature = "web_viewer"))] {
+                Err(anyhow::anyhow!(
+                    "Can't host web-viewer - rerun was not compiled with the 'web_viewer' feature"
+                ))
+            } else {
+                let open_browser = args.web_viewer;
+                let receivers = ReceiversFromUrlParams::new(
+                    url_or_paths,
+                    &UrlParamProcessingConfig::grpc_server_and_web_viewer(),
+                    &connection_registry,
+                    None,
+                    args.follow,
+                )?;
+                #[cfg(all(feature = "server", feature = "web_viewer"))]
+                serve_web(
+                    receivers,
+                    args.web_viewer_port,
+                    args.renderer,
+                    args.video_decoder,
+                    server_addr,
+                    server_options,
+                    open_browser,
+                )
+            }
+        }
+    } else if args.connect.is_none() && is_another_server_already_running(server_addr) {
+        let receivers = ReceiversFromUrlParams::new(
+            url_or_paths,
+            &UrlParamProcessingConfig::convert_everything_to_data_sources(),
+            &connection_registry,
+            None,
+            args.follow,
+        )?;
+        connect_to_existing_server(receivers, server_addr)
+    } else {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "native_viewer")] {
+                start_native_viewer_with_wrapper(
+                    &args,
+                    url_or_paths,
+                    _main_thread_token,
+                    _build_info,
+                    _call_source,
+                    tokio_runtime_handle,
+                    profiler,
+                    connection_registry,
+                    #[cfg(feature = "server")]
+                    server_addr,
+                    #[cfg(feature = "server")]
+                    server_options,
+                    app_wrapper,
+                )
+            } else {
+                Err(anyhow::anyhow!(
+                    "Can't start viewer - rerun was compiled without the 'native_viewer' feature"
+                ))
+            }
+        }
+    }
+}
+
+/// Like `start_native_viewer` but wraps the App via `app_wrapper` if provided.
+#[cfg(feature = "native_viewer")]
+#[expect(clippy::too_many_arguments)]
+#[allow(clippy::allow_attributes, unused_variables)]
+fn start_native_viewer_with_wrapper(
+    args: &Args,
+    url_or_paths: Vec<String>,
+    _main_thread_token: re_viewer::MainThreadToken,
+    _build_info: re_build_info::BuildInfo,
+    call_source: CallSource,
+    tokio_runtime_handle: &tokio::runtime::Handle,
+    profiler: re_tracing::Profiler,
+    connection_registry: re_redap_client::ConnectionRegistryHandle,
+    #[cfg(feature = "server")] server_addr: std::net::SocketAddr,
+    #[cfg(feature = "server")] server_options: re_sdk::ServerOptions,
+    app_wrapper: Option<AppWrapper>,
+) -> anyhow::Result<()> {
+    use re_viewer::external::re_viewer_context;
+    use crate::external::re_ui::{UICommand, UICommandSender as _};
+
+    let startup_options = native_startup_options_from_args(args)?;
+
+    let connect = args.connect.is_some();
+    let follow = args.follow;
+    let renderer = args.renderer.as_deref();
+
+    let (command_tx, command_rx) = re_viewer_context::command_channel();
+    let auth_error_handler = re_viewer::App::auth_error_handler(command_tx.clone());
+    let tokio_runtime_handle = tokio_runtime_handle.clone();
+    let text_log_rx = re_viewer::register_text_log_receiver();
+
+    re_viewer::run_native_app(
+        _main_thread_token,
+        Box::new(move |cc| {
+            {
+                let tx = command_tx.clone();
+                let egui_ctx = cc.egui_ctx.clone();
+                tokio::spawn(async move {
+                    match tokio::signal::ctrl_c().await {
+                        Ok(()) => {
+                            re_log::info!("Caught Ctrl-C, quitting…");
+                            tx.send_ui(UICommand::Quit);
+                            egui_ctx.request_repaint();
+                        }
+                        Err(err) => {
+                            re_log::error!("Failed to listen for ctrl-c signal: {err}");
+                        }
+                    }
+                });
+            }
+            let mut app = re_viewer::App::with_commands(
+                _main_thread_token,
+                _build_info,
+                call_source.app_env(),
+                startup_options,
+                cc,
+                Some(connection_registry.clone()),
+                re_viewer::AsyncRuntimeHandle::new_native(tokio_runtime_handle),
+                text_log_rx,
+                (command_tx, command_rx),
+            );
+
+            #[allow(clippy::allow_attributes, unused_mut)]
+            let ReceiversFromUrlParams {
+                mut log_receivers,
+                urls_to_pass_on_to_viewer,
+            } = ReceiversFromUrlParams::new(
+                url_or_paths,
+                &UrlParamProcessingConfig::native_viewer(),
+                &connection_registry,
+                Some(auth_error_handler),
+                follow,
+            )?;
+
+            #[cfg(feature = "server")]
+            if !connect {
+                let log_receiver = re_grpc_server::spawn_with_recv(
+                    server_addr,
+                    server_options,
+                    re_grpc_server::shutdown::never(),
+                );
+                log_receivers.push(log_receiver);
+            }
+
+            app.set_profiler(profiler);
+            for rx in log_receivers {
+                app.add_log_receiver(rx);
+            }
+            for url in urls_to_pass_on_to_viewer {
+                app.open_url_or_file(&url);
+            }
+            if let Ok(url) = std::env::var("EXAMPLES_MANIFEST_URL") {
+                app.set_examples_manifest_url(url);
+            }
+
+            // Apply the DimOS wrapper if provided, otherwise return stock App
+            if let Some(wrapper) = app_wrapper {
+                wrapper(app)
+            } else {
+                Ok(Box::new(app))
+            }
+        }),
+        renderer,
+    )
+    .map_err(|err| err.into())
 }
