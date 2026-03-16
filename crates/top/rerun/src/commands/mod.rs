@@ -9,7 +9,7 @@ pub enum CallSource {
 
 impl CallSource {
     #[cfg(feature = "native_viewer")]
-    fn app_env(&self) -> re_viewer::AppEnvironment {
+    pub fn app_env(&self) -> re_viewer::AppEnvironment {
         match self {
             Self::Cli => re_viewer::AppEnvironment::RerunCli {
                 rustc_version: env!("RE_BUILD_RUSTC_VERSION").into(),
@@ -35,7 +35,7 @@ mod analytics;
 
 #[cfg(feature = "analytics")]
 pub(crate) use self::analytics::AnalyticsCommands;
-pub use self::entrypoint::run;
+pub use self::entrypoint::{run, run_with_app_wrapper, AppWrapper, Args as RerunArgs, native_startup_options_from_args};
 #[cfg(feature = "data_loaders")]
 pub use self::mcap::McapCommands;
 pub use self::rrd::RrdCommands;
