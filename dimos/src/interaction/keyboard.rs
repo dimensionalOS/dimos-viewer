@@ -19,7 +19,6 @@ const BASE_ANGULAR_SPEED: f64 = 0.8;  // rad/s
 const FAST_MULTIPLIER: f64 = 2.0;     // Shift modifier
 
 /// Overlay styling
-const OVERLAY_MARGIN: f32 = 12.0;
 const OVERLAY_PADDING: f32 = 10.0;
 const OVERLAY_ROUNDING: f32 = 8.0;
 const OVERLAY_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(20, 20, 30, 220);
@@ -66,11 +65,13 @@ impl KeyState {
 }
 
 /// Handles keyboard input and publishes Twist via LCM.
+/// Must be activated by clicking the overlay before keys are captured.
 pub struct KeyboardHandler {
     publisher: LcmPublisher,
     state: KeyState,
     was_active: bool,
     estop_flash: bool,  // true briefly after space pressed
+    engaged: bool,      // true when user has clicked the overlay to activate
 }
 
 impl KeyboardHandler {
@@ -82,29 +83,30 @@ impl KeyboardHandler {
             state: KeyState::new(),
             was_active: false,
             estop_flash: false,
+            engaged: false,
         })
     }
 
     /// Process keyboard input from egui and publish Twist if keys are held.
     /// Called once per frame from DimosApp.ui().
+    /// Only captures keys when the overlay has been clicked (engaged).
     ///
     /// Returns true if any movement key is active (for UI overlay).
     pub fn process(&mut self, ctx: &egui::Context) -> bool {
         self.estop_flash = false;
 
-        // Check if any text widget has focus - if so, skip keyboard capture
-        let text_has_focus = ctx.memory(|m| m.focused().is_some());
-        if text_has_focus {
+        // If not engaged, don't capture any keys
+        if !self.engaged {
             if self.was_active {
                 if let Err(e) = self.publish_stop() {
-                    re_log::warn!("Failed to send stop command on focus change: {e:?}");
+                    re_log::warn!("Failed to send stop on disengage: {e:?}");
                 }
                 self.was_active = false;
             }
             return false;
         }
 
-        // Update key state from egui input
+        // Update key state from egui input (engaged flag is the only gate)
         self.update_key_state(ctx);
 
         // Check for emergency stop (Space key pressed - one-shot action)
@@ -134,33 +136,85 @@ impl KeyboardHandler {
         self.state.any_active()
     }
 
-    /// Draw keyboard overlay HUD. Always shown (dim when idle, bright when active).
-    pub fn draw_overlay(&self, ctx: &egui::Context) {
-        egui::Area::new("keyboard_hud".into())
-            .fixed_pos(egui::pos2(OVERLAY_MARGIN, OVERLAY_MARGIN))
+    /// Draw keyboard overlay HUD at bottom-right of the 3D viewport area.
+    /// Clickable: clicking the overlay toggles engaged state.
+    pub fn draw_overlay(&mut self, ctx: &egui::Context) {
+        let screen_rect = ctx.content_rect();
+        // Default position: bottom-left, just above the timeline bar
+        let overlay_height = 160.0;
+        let left_margin = 12.0;
+        let bottom_timeline_offset = 120.0;
+        let default_pos = egui::pos2(
+            screen_rect.min.x + left_margin,
+            screen_rect.max.y - overlay_height - bottom_timeline_offset,
+        );
+
+        let area_response = egui::Area::new("keyboard_hud".into())
+            .pivot(egui::Align2::LEFT_BOTTOM)
+            .default_pos(default_pos)
+            .movable(true)
             .order(egui::Order::Foreground)
-            .interactable(false)
+            .interactable(true)
             .show(ctx, |ui| {
-                egui::Frame::new()
+                let border_color = if self.engaged {
+                    egui::Color32::from_rgb(60, 180, 75) // green border when active
+                } else {
+                    egui::Color32::from_rgb(80, 80, 100) // dim border when inactive
+                };
+
+                let response = egui::Frame::new()
                     .fill(OVERLAY_BG)
                     .corner_radius(egui::CornerRadius::same(OVERLAY_ROUNDING as u8))
                     .inner_margin(egui::Margin::same(OVERLAY_PADDING as i8))
+                    .stroke(egui::Stroke::new(2.0, border_color))
                     .show(ui, |ui| {
                         self.draw_hud_content(ui);
                     });
-            });
+
+                // Make the frame rect clickable (Frame doesn't have click sense by default)
+                let click_response = ui.interact(
+                    response.response.rect,
+                    ui.id().with("wasd_click"),
+                    egui::Sense::click(),
+                );
+
+                // Force arrow cursor over the entire overlay (overrides label I-beam)
+                if click_response.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Default);
+                }
+
+                // Toggle engaged state on click
+                if click_response.clicked() {
+                    self.engaged = !self.engaged;
+                    if !self.engaged {
+                        // Send stop when disengaging
+                        if let Err(e) = self.publish_stop() {
+                            re_log::warn!("Failed to send stop on disengage: {e:?}");
+                        }
+                        self.state.reset();
+                        self.was_active = false;
+                    }
+                }
+            })
+            .response;
+
+        // Disengage when clicking anywhere outside the overlay
+        if self.engaged
+            && !ctx.rect_contains_pointer(area_response.layer_id, area_response.interact_rect)
+            && ctx.input(|i| i.pointer.primary_clicked())
+        {
+            self.engaged = false;
+            if let Err(e) = self.publish_stop() {
+                re_log::warn!("Failed to send stop on outside click: {e:?}");
+            }
+            self.state.reset();
+            self.was_active = false;
+        }
     }
 
     fn draw_hud_content(&self, ui: &mut egui::Ui) {
-        let active = self.state.any_active() || self.estop_flash;
-
         // Title
-        let title_color = if active {
-            egui::Color32::WHITE
-        } else {
-            egui::Color32::from_rgb(120, 120, 140)
-        };
-        ui.label(egui::RichText::new("🎮 Keyboard Teleop").color(title_color).size(13.0));
+        ui.label(egui::RichText::new("Keyboard Teleop").color(LABEL_COLOR).size(13.0));
         ui.add_space(4.0);
 
         // Key grid:  [Q] [W] [E]
@@ -352,6 +406,7 @@ mod tests {
             state,
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, BASE_LINEAR_SPEED);
@@ -368,6 +423,7 @@ mod tests {
             state,
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
@@ -381,6 +437,7 @@ mod tests {
             state,
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
@@ -397,6 +454,7 @@ mod tests {
             state,
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
@@ -410,6 +468,7 @@ mod tests {
             state,
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
@@ -427,6 +486,7 @@ mod tests {
             state,
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, BASE_LINEAR_SPEED * FAST_MULTIPLIER);
@@ -444,6 +504,7 @@ mod tests {
             state,
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, BASE_LINEAR_SPEED);
@@ -471,6 +532,7 @@ mod tests {
         assert!(handler.is_ok());
         let handler = handler.unwrap();
         assert!(!handler.was_active);
+        assert!(!handler.engaged);
         assert!(!handler.state.any_active());
     }
 
@@ -484,6 +546,7 @@ mod tests {
             state,
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
@@ -498,6 +561,7 @@ mod tests {
             state: KeyState::new(),
             was_active: false,
             estop_flash: false,
+            engaged: true,
         };
         let (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
