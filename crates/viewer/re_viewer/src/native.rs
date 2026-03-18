@@ -1,5 +1,5 @@
 /// Used by `eframe` to decide where to store the app state.
-pub const APP_ID: &str = "rerun";
+pub const APP_ID: &str = "dimos-viewer";
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
