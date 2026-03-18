@@ -1708,6 +1708,13 @@ fn record_cli_command_analytics(args: &Args) {
 /// Used by dimos-viewer to inject keyboard teleop and other behaviors.
 pub type AppWrapper = Box<dyn FnOnce(re_viewer::App) -> Result<Box<dyn re_viewer::external::eframe::App>, Box<dyn std::error::Error + Send + Sync>> + Send>;
 
+/// Optional patches to [`re_viewer::StartupOptions`] injected by the app wrapper.
+#[derive(Default)]
+pub struct StartupOptionsPatch {
+    /// Callback invoked on viewer events (e.g. SelectionChange for click-to-nav).
+    pub on_event: Option<std::rc::Rc<dyn Fn(re_viewer::ViewerEvent)>>,
+}
+
 /// Like [`run`], but accepts an optional `app_wrapper` callback that wraps the
 /// viewer App before it is handed to eframe. When `app_wrapper` is `None`,
 /// behavior is identical to stock Rerun.
@@ -1720,6 +1727,7 @@ pub fn run_with_app_wrapper<I, T>(
     call_source: CallSource,
     args: I,
     app_wrapper: Option<AppWrapper>,
+    startup_patch: Option<StartupOptionsPatch>,
 ) -> anyhow::Result<u8>
 where
     I: IntoIterator<Item = T>,
@@ -1812,6 +1820,7 @@ where
             #[cfg(feature = "native_viewer")]
             profiler,
             app_wrapper,
+            startup_patch,
         )
     };
 
@@ -1838,6 +1847,7 @@ fn run_impl_with_wrapper(
     tokio_runtime_handle: &tokio::runtime::Handle,
     #[cfg(feature = "native_viewer")] profiler: re_tracing::Profiler,
     app_wrapper: Option<AppWrapper>,
+    startup_patch: Option<StartupOptionsPatch>,
 ) -> anyhow::Result<()> {
     let connection_registry = re_redap_client::ConnectionRegistry::new_with_stored_credentials();
 
@@ -1959,6 +1969,7 @@ fn run_impl_with_wrapper(
                     #[cfg(feature = "server")]
                     server_options,
                     app_wrapper,
+                    startup_patch,
                 )
             } else {
                 Err(anyhow::anyhow!(
@@ -1985,11 +1996,17 @@ fn start_native_viewer_with_wrapper(
     #[cfg(feature = "server")] server_addr: std::net::SocketAddr,
     #[cfg(feature = "server")] server_options: re_sdk::ServerOptions,
     app_wrapper: Option<AppWrapper>,
+    startup_patch: Option<StartupOptionsPatch>,
 ) -> anyhow::Result<()> {
     use re_viewer::external::re_viewer_context;
     use crate::external::re_ui::{UICommand, UICommandSender as _};
 
-    let startup_options = native_startup_options_from_args(args)?;
+    let mut startup_options = native_startup_options_from_args(args)?;
+    if let Some(patch) = startup_patch {
+        if patch.on_event.is_some() {
+            startup_options.on_event = patch.on_event;
+        }
+    }
 
     let connect = args.connect.is_some();
     let follow = args.follow;

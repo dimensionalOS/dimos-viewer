@@ -124,7 +124,7 @@ pub mod demo_util;
 pub mod log_integration;
 
 #[cfg(feature = "run")]
-pub use commands::{CallSource, run, run_with_app_wrapper, AppWrapper, RerunArgs, native_startup_options_from_args};
+pub use commands::{CallSource, run, run_with_app_wrapper, AppWrapper, StartupOptionsPatch, RerunArgs, native_startup_options_from_args};
 #[cfg(feature = "log")]
 pub use log_integration::Logger;
 #[cfg(feature = "log")]
