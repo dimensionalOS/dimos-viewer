@@ -8,6 +8,7 @@
 
 use std::io;
 use super::lcm::{LcmPublisher, twist_command};
+use super::ws::WsPublisher;
 use rerun::external::{egui, re_log};
 
 /// LCM channel for twist commands (matches DimOS convention)
@@ -64,10 +65,12 @@ impl KeyState {
     }
 }
 
-/// Handles keyboard input and publishes Twist via LCM.
+/// Handles keyboard input and publishes Twist via LCM or WebSocket.
 /// Must be activated by clicking the overlay before keys are captured.
 pub struct KeyboardHandler {
     publisher: LcmPublisher,
+    /// When set (connect mode), publish twist/stop over WebSocket instead of LCM.
+    ws: Option<WsPublisher>,
     state: KeyState,
     was_active: bool,
     estop_flash: bool,  // true briefly after space pressed
@@ -75,11 +78,27 @@ pub struct KeyboardHandler {
 }
 
 impl KeyboardHandler {
-    /// Create a new keyboard handler with LCM publisher on CMD_VEL_CHANNEL.
+    /// Create a new keyboard handler that publishes twist commands via LCM.
     pub fn new() -> Result<Self, io::Error> {
         let publisher = LcmPublisher::new(CMD_VEL_CHANNEL.to_string())?;
         Ok(Self {
             publisher,
+            ws: None,
+            state: KeyState::new(),
+            was_active: false,
+            estop_flash: false,
+            engaged: false,
+        })
+    }
+
+    /// Create a keyboard handler that publishes via WebSocket (connect mode).
+    ///
+    /// LCM is still created (cheap UDP socket) but will not be used.
+    pub fn new_ws(ws: WsPublisher) -> Result<Self, io::Error> {
+        let publisher = LcmPublisher::new(CMD_VEL_CHANNEL.to_string())?;
+        Ok(Self {
+            publisher,
+            ws: Some(ws),
             state: KeyState::new(),
             was_active: false,
             estop_flash: false,
@@ -308,16 +327,16 @@ impl KeyboardHandler {
         });
     }
 
-    /// Convert current KeyState to Twist and publish via LCM.
+    /// Convert current KeyState to Twist and publish via WebSocket or LCM.
     fn publish_twist(&mut self) -> io::Result<()> {
         let (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z) = self.compute_twist();
 
-        let cmd = twist_command(
-            [lin_x, lin_y, lin_z],
-            [ang_x, ang_y, ang_z],
-        );
-
-        self.publisher.publish_twist(&cmd)?;
+        if let Some(ws) = &self.ws {
+            ws.send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z);
+        } else {
+            let cmd = twist_command([lin_x, lin_y, lin_z], [ang_x, ang_y, ang_z]);
+            self.publisher.publish_twist(&cmd)?;
+        }
 
         re_log::trace!(
             "Published twist: lin=({:.2},{:.2},{:.2}) ang=({:.2},{:.2},{:.2})",
@@ -327,10 +346,14 @@ impl KeyboardHandler {
         Ok(())
     }
 
-    /// Publish all-zero twist (stop command)
+    /// Publish all-zero twist (stop command) via WebSocket or LCM.
     fn publish_stop(&mut self) -> io::Result<()> {
-        let cmd = twist_command([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
-        self.publisher.publish_twist(&cmd)?;
+        if let Some(ws) = &self.ws {
+            ws.send_stop();
+        } else {
+            let cmd = twist_command([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
+            self.publisher.publish_twist(&cmd)?;
+        }
         re_log::debug!("Published stop command");
         Ok(())
     }
@@ -403,6 +426,7 @@ mod tests {
         state.forward = true;
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state,
             was_active: false,
             estop_flash: false,
@@ -420,6 +444,7 @@ mod tests {
         state.left = true;
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state,
             was_active: false,
             estop_flash: false,
@@ -434,6 +459,7 @@ mod tests {
         state.right = true;
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state,
             was_active: false,
             estop_flash: false,
@@ -451,6 +477,7 @@ mod tests {
         state.strafe_l = true;
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state,
             was_active: false,
             estop_flash: false,
@@ -465,6 +492,7 @@ mod tests {
         state.strafe_r = true;
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state,
             was_active: false,
             estop_flash: false,
@@ -483,6 +511,7 @@ mod tests {
         state.fast = true;
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state,
             was_active: false,
             estop_flash: false,
@@ -501,6 +530,7 @@ mod tests {
         state.left = true;
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state,
             was_active: false,
             estop_flash: false,
@@ -543,6 +573,7 @@ mod tests {
         state.backward = true;
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state,
             was_active: false,
             estop_flash: false,
@@ -558,6 +589,7 @@ mod tests {
     fn test_compute_twist_all_zeros() {
         let handler = KeyboardHandler {
             publisher: LcmPublisher::new("/test".to_string()).unwrap(),
+            ws: None,
             state: KeyState::new(),
             was_active: false,
             estop_flash: false,

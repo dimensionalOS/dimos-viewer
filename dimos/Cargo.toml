@@ -26,10 +26,12 @@ rerun = { path = "../crates/top/rerun", default-features = false, features = [
   "server",
 ] }
 
+axum = { workspace = true, features = ["ws"] }
 clap = { workspace = true, features = ["derive"] }
 bincode.workspace = true
 mimalloc.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 tokio = { workspace = true, features = [
   "io-util",
   "macros",
