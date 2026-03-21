@@ -22,8 +22,8 @@ const RAPID_CLICK_THRESHOLD: usize = 5;
 /// Default gRPC listen port (9877 to avoid conflict with stock Rerun on 9876)
 const DEFAULT_PORT: u16 = 9877;
 
-/// Default WebSocket event port used in --connect mode
-const DEFAULT_WS_PORT: u16 = 3030;
+/// Default WebSocket server URL to connect to in --connect mode
+const DEFAULT_WS_URL: &str = "ws://127.0.0.1:3030/ws";
 
 /// DimOS Interactive Viewer — a custom Rerun viewer with LCM click-to-navigate.
 ///
@@ -65,13 +65,18 @@ struct Args {
     #[arg(long)]
     connect: Option<Option<String>>,
 
-    /// WebSocket port for publishing click/keyboard events in --connect mode.
+    /// WebSocket server URL to connect to for publishing click/keyboard events.
     ///
-    /// A WebSocket server is started on `ws://0.0.0.0:<ws_port>/ws` and
-    /// broadcasts JSON events to all connected clients.
-    /// Ignored when not using --connect.
-    #[arg(long, default_value_t = DEFAULT_WS_PORT)]
-    ws_port: u16,
+    /// The viewer connects as a WebSocket CLIENT to this URL and sends JSON
+    /// events (click, twist, stop). The server is typically the Python
+    /// `RerunWebSocketServer` DimOS module.
+    ///
+    /// When provided explicitly this flag activates WebSocket event publishing
+    /// in ALL modes (local gRPC server or --connect). When omitted, the
+    /// behaviour depends on the mode: --connect defaults to this URL; local
+    /// mode defaults to LCM multicast.
+    #[arg(long)]
+    ws_url: Option<String>,
 }
 
 /// Wraps re_viewer::App to add keyboard control interception.
@@ -156,9 +161,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    // In connect mode: use WebSocket for events. Otherwise: use LCM (multicast).
-    let (lcm_publisher, ws_publisher, keyboard_handler) = if args.connect.is_some() {
-        let ws = WsPublisher::spawn(args.ws_port);
+    // Resolve the effective WebSocket URL:
+    //   - explicit --ws-url  → always use WS (local or connect mode)
+    //   - --connect (no --ws-url) → default WS URL
+    //   - neither             → LCM multicast
+    let effective_ws_url: Option<String> = match (&args.ws_url, &args.connect) {
+        (Some(url), _) => Some(url.clone()),                          // explicit --ws-url
+        (None, Some(_)) => Some(DEFAULT_WS_URL.to_string()),          // --connect default
+        (None, None) => None,                                         // local LCM mode
+    };
+
+    let (lcm_publisher, ws_publisher, keyboard_handler) = if let Some(ws_url) = effective_ws_url {
+        let ws = WsPublisher::connect(ws_url.clone());
+        re_log::info!("WebSocket client connecting to {ws_url}");
         let kb = KeyboardHandler::new_ws(ws.clone())
             .expect("Failed to create keyboard handler");
         (None::<LcmPublisher>, Some(ws), kb)

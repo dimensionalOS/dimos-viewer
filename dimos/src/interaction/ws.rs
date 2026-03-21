@@ -1,39 +1,28 @@
-//! WebSocket event publisher for remote (non-LCM) mode.
+//! WebSocket client for remote (non-LCM) mode.
 //!
 //! When `dimos-viewer` is started with `--connect`, LCM multicast is unavailable
-//! across machines. This module spawns a small WebSocket server on a local port
-//! and broadcasts click and twist events as JSON to every connected client.
+//! across machines. This module connects to a WebSocket server (typically the
+//! Python `RerunWebSocketServer` module) and sends click, twist, and stop events
+//! as JSON.
 //!
-//! Message format: newline-delimited JSON objects with a `"type"` discriminant.
+//! Message format (JSON objects with a `"type"` discriminant):
 //!
 //! ```json
-//! {"type":"heartbeat","timestamp_ms":1234567890}
 //! {"type":"click","x":1.0,"y":2.0,"z":3.0,"entity_path":"/world","timestamp_ms":1234567890}
 //! {"type":"twist","linear_x":0.5,"linear_y":0.0,"linear_z":0.0,"angular_x":0.0,"angular_y":0.0,"angular_z":0.8}
 //! {"type":"stop"}
 //! ```
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use axum::{
-    Router,
-    extract::{
-        WebSocketUpgrade,
-        ws::{Message, WebSocket},
-    },
-    routing::get,
-};
 use rerun::external::re_log;
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 /// JSON message variants sent over the WebSocket.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsEvent {
-    Heartbeat {
-        timestamp_ms: u64,
-    },
     Click {
         x: f64,
         y: f64,
@@ -52,73 +41,32 @@ pub enum WsEvent {
     Stop,
 }
 
-/// Broadcasts `WsEvent`s (serialised to JSON) to all connected WebSocket clients.
+/// Sends `WsEvent`s (serialised to JSON) to a remote WebSocket server.
 ///
-/// The internal sender is `Clone`, so you can hand copies to multiple producers
+/// Maintains a persistent connection with automatic reconnection. The
+/// internal sender is `Clone`, so you can hand copies to multiple producers
 /// (keyboard handler, click handler, …).
 #[derive(Clone)]
 pub struct WsPublisher {
-    tx: broadcast::Sender<String>,
+    tx: mpsc::Sender<String>,
 }
 
 impl WsPublisher {
-    /// Spawn the WebSocket server and heartbeat task, then return a publisher.
+    /// Spawn the WebSocket client task and return a publisher.
     ///
-    /// The server listens on `ws://0.0.0.0:<port>/ws`.
-    pub fn spawn(port: u16) -> Self {
-        let (tx, _rx) = broadcast::channel::<String>(256);
+    /// The client connects to `url` (e.g. `ws://127.0.0.1:3030/ws`) and
+    /// reconnects automatically whenever the connection drops.
+    pub fn connect(url: String) -> Self {
+        let (tx, rx) = mpsc::channel::<String>(256);
 
-        // WebSocket server
-        {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let app = Router::new().route(
-                    "/ws",
-                    get(move |upgrade: WebSocketUpgrade| {
-                        let rx = tx.subscribe();
-                        async move { upgrade.on_upgrade(move |socket| serve_client(socket, rx)) }
-                    }),
-                );
-
-                let addr = format!("0.0.0.0:{port}");
-                match tokio::net::TcpListener::bind(&addr).await {
-                    Ok(listener) => {
-                        re_log::info!("WebSocket event server listening on ws://{addr}/ws");
-                        if let Err(err) = axum::serve(listener, app).await {
-                            re_log::error!("WebSocket server error: {err}");
-                        }
-                    }
-                    Err(err) => {
-                        re_log::error!("Failed to bind WebSocket server on {addr}: {err}");
-                    }
-                }
-            });
-        }
-
-        // Heartbeat task — 1 Hz
-        {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(Duration::from_secs(1));
-                loop {
-                    ticker.tick().await;
-                    let ts = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    let event = WsEvent::Heartbeat { timestamp_ms: ts };
-                    if let Ok(json) = serde_json::to_string(&event) {
-                        // Ignore send errors — nobody connected yet is fine
-                        let _ = tx.send(json);
-                    }
-                }
-            });
-        }
+        tokio::spawn(async move {
+            run_client(url, rx).await;
+        });
 
         Self { tx }
     }
 
-    /// Publish a click event to all connected clients.
+    /// Publish a click event.
     pub fn send_click(&self, x: f64, y: f64, z: f64, entity_path: &str, timestamp_ms: u64) {
         let event = WsEvent::Click {
             x,
@@ -130,7 +78,7 @@ impl WsPublisher {
         self.broadcast(event);
     }
 
-    /// Publish a twist (velocity) command to all connected clients.
+    /// Publish a twist (velocity) command.
     pub fn send_twist(
         &self,
         linear_x: f64,
@@ -151,37 +99,54 @@ impl WsPublisher {
         self.broadcast(event);
     }
 
-    /// Publish a stop command to all connected clients.
+    /// Publish a stop command.
     pub fn send_stop(&self) {
         self.broadcast(WsEvent::Stop);
     }
 
-    /// Return a clone of the underlying broadcast sender for use in other tasks.
-    pub fn sender(&self) -> broadcast::Sender<String> {
-        self.tx.clone()
-    }
-
     fn broadcast(&self, event: WsEvent) {
         if let Ok(json) = serde_json::to_string(&event) {
-            // Ignore if there are no receivers
-            let _ = self.tx.send(json);
+            // Non-blocking: drop message if the channel is full rather than block the UI thread.
+            if self.tx.try_send(json).is_err() {
+                re_log::warn!("WsPublisher: send queue full, dropped event");
+            }
         }
     }
 }
 
-/// Per-client WebSocket task: forward broadcast messages until the client disconnects.
-async fn serve_client(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
+/// Background task: connect → send → reconnect loop.
+async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    use futures_util::SinkExt;
+
     loop {
-        match rx.recv().await {
-            Ok(msg) => {
-                if socket.send(Message::text(msg)).await.is_err() {
-                    break; // client disconnected
+        re_log::info!("WsPublisher: connecting to {url}");
+
+        match connect_async(&url).await {
+            Ok((mut ws_stream, _)) => {
+                re_log::info!("WsPublisher: connected to {url}");
+
+                // Drain the channel into the WebSocket until it closes or errors.
+                while let Some(msg) = rx.recv().await {
+                    if let Err(err) = ws_stream.send(Message::text(msg)).await {
+                        re_log::warn!("WsPublisher: send error: {err} — reconnecting");
+                        break;
+                    }
+                }
+                // rx closed → task is done
+                if rx.is_closed() {
+                    break;
                 }
             }
-            Err(broadcast::error::RecvError::Closed) => break,
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                re_log::warn!("WebSocket client lagged, dropped {n} messages");
+            Err(err) => {
+                re_log::debug!("WsPublisher: connection failed: {err} — retrying in 1s");
             }
         }
+
+        // Drain any stale commands queued during the disconnect — sending
+        // outdated velocity commands on reconnect would be dangerous.
+        while rx.try_recv().is_ok() {}
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }

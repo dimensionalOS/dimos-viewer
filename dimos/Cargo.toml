@@ -26,9 +26,9 @@ rerun = { path = "../crates/top/rerun", default-features = false, features = [
   "server",
 ] }
 
-axum = { workspace = true, features = ["ws"] }
 clap = { workspace = true, features = ["derive"] }
 bincode.workspace = true
+futures-util.workspace = true
 mimalloc.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -41,6 +41,7 @@ tokio = { workspace = true, features = [
   "sync",
   "time",
 ] }
+tokio-tungstenite = "0.28.0"
 
 [lints]
 workspace = true
