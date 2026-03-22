@@ -116,25 +116,57 @@ impl WsPublisher {
 
 /// Background task: connect → send → reconnect loop.
 async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
+    use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message};
-    use futures_util::SinkExt;
 
     loop {
         re_log::info!("WsPublisher: connecting to {url}");
 
         match connect_async(&url).await {
-            Ok((mut ws_stream, _)) => {
+            Ok((ws_stream, _)) => {
                 re_log::info!("WsPublisher: connected to {url}");
 
-                // Drain the channel into the WebSocket until it closes or errors.
-                while let Some(msg) = rx.recv().await {
-                    if let Err(err) = ws_stream.send(Message::text(msg)).await {
-                        re_log::warn!("WsPublisher: send error: {err} — reconnecting");
-                        break;
+                let (mut writer, mut reader) = ws_stream.split();
+
+                // Read task: consume incoming frames (ping → auto pong) so the
+                // server's keepalive pings get answered and the connection stays
+                // alive.  Exits when the server closes or an error occurs.
+                let mut read_handle = tokio::spawn(async move {
+                    while let Some(frame) = reader.next().await {
+                        match frame {
+                            Ok(Message::Close(_)) => break,
+                            Err(err) => {
+                                re_log::debug!("WsPublisher: read error: {err}");
+                                break;
+                            }
+                            _ => {} // Ping/Pong handled by tungstenite internally
+                        }
                     }
-                }
-                // rx closed → task is done
-                if rx.is_closed() {
+                });
+
+                // Write loop: drain the channel into the WebSocket.
+                let disconnected = loop {
+                    tokio::select! {
+                        msg = rx.recv() => {
+                            match msg {
+                                Some(text) => {
+                                    if let Err(err) = writer.send(Message::text(text)).await {
+                                        re_log::warn!("WsPublisher: send error: {err} — reconnecting");
+                                        break false;
+                                    }
+                                }
+                                None => break true, // rx closed → task is done
+                            }
+                        }
+                        _ = &mut read_handle => {
+                            // Reader exited → server closed the connection.
+                            re_log::warn!("WsPublisher: server closed connection — reconnecting");
+                            break false;
+                        }
+                    }
+                };
+
+                if disconnected {
                     break;
                 }
             }
