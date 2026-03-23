@@ -4727,7 +4727,7 @@ provides-extras = ["all", "datafusion", "dataplatform", "notebook", "tests"]
 
 [[package]]
 name = "rerun-workspace"
-version = "0.28.0a1+dev"
+version = "0.30.0a4"
 source = { virtual = "." }
 
 [package.dev-dependencies]

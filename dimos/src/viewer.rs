@@ -3,15 +3,12 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use dimos_viewer::interaction::{LcmPublisher, KeyboardHandler, WsPublisher, click_event_from_ms};
+use dimos_viewer::interaction::{KeyboardHandler, WsPublisher};
 use rerun::external::{eframe, egui, re_crash_handler, re_grpc_client, re_grpc_server, re_log, re_memory, re_uri, re_viewer};
 
 #[global_allocator]
 static GLOBAL: re_memory::AccountingAllocator<mimalloc::MiMalloc> =
     re_memory::AccountingAllocator::new(mimalloc::MiMalloc);
-
-/// LCM channel for click events (follows RViz convention)
-const LCM_CHANNEL: &str = "/clicked_point#geometry_msgs.PointStamped";
 
 /// Minimum time between click events (debouncing)
 const CLICK_DEBOUNCE_MS: u64 = 100;
@@ -25,7 +22,7 @@ const DEFAULT_PORT: u16 = 9877;
 /// Default WebSocket server URL to connect to in --connect mode
 const DEFAULT_WS_URL: &str = "ws://127.0.0.1:3030/ws";
 
-/// DimOS Interactive Viewer — a custom Rerun viewer with LCM click-to-navigate.
+/// DimOS Interactive Viewer — a custom Rerun viewer with click-to-navigate.
 ///
 /// Accepts the same CLI flags as the stock `rerun` binary so it can be spawned
 /// seamlessly via `rerun_bindings.spawn(executable_name="dimos-viewer")`.
@@ -71,10 +68,8 @@ struct Args {
     /// events (click, twist, stop). The server is typically the Python
     /// `RerunWebSocketServer` DimOS module.
     ///
-    /// When provided explicitly this flag activates WebSocket event publishing
-    /// in ALL modes (local gRPC server or --connect). When omitted, the
-    /// behaviour depends on the mode: --connect defaults to this URL; local
-    /// mode defaults to LCM multicast.
+    /// When provided explicitly this flag overrides the default URL.
+    /// When omitted, defaults to ws://127.0.0.1:3030/ws.
     #[arg(long)]
     ws_url: Option<String>,
 }
@@ -161,30 +156,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    // Resolve the effective WebSocket URL:
-    //   - explicit --ws-url  → always use WS (local or connect mode)
-    //   - --connect (no --ws-url) → default WS URL
-    //   - neither             → LCM multicast
-    let effective_ws_url: Option<String> = match (&args.ws_url, &args.connect) {
-        (Some(url), _) => Some(url.clone()),                          // explicit --ws-url
-        (None, Some(_)) => Some(DEFAULT_WS_URL.to_string()),          // --connect default
-        (None, None) => None,                                         // local LCM mode
-    };
-
-    let (lcm_publisher, ws_publisher, keyboard_handler) = if let Some(ws_url) = effective_ws_url {
-        let ws = WsPublisher::connect(ws_url.clone());
-        re_log::info!("WebSocket client connecting to {ws_url}");
-        let kb = KeyboardHandler::new_ws(ws.clone())
-            .expect("Failed to create keyboard handler");
-        (None::<LcmPublisher>, Some(ws), kb)
-    } else {
-        let lcm = LcmPublisher::new(LCM_CHANNEL.to_string())
-            .expect("Failed to create LCM publisher");
-        re_log::info!("LCM publisher created for channel: {LCM_CHANNEL}");
-        let kb = KeyboardHandler::new()
-            .expect("Failed to create keyboard handler");
-        (Some(lcm), None::<WsPublisher>, kb)
-    };
+    // Resolve the WebSocket URL (always WebSocket, no LCM):
+    //   - explicit --ws-url  → use that URL
+    //   - otherwise          → default URL
+    let ws_url = args.ws_url.unwrap_or_else(|| DEFAULT_WS_URL.to_string());
+    let ws_publisher = WsPublisher::connect(ws_url.clone());
+    re_log::info!("WebSocket client connecting to {ws_url}");
+    let keyboard_handler = KeyboardHandler::new(ws_publisher.clone());
 
 
     // State for debouncing and rapid click detection
@@ -248,44 +226,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap_or_default()
                                     .as_millis() as u64;
 
-                                if let Some(ws) = &ws_publisher {
-                                    // Connect mode: publish click over WebSocket
-                                    ws.send_click(
-                                        pos.x as f64,
-                                        pos.y as f64,
-                                        pos.z as f64,
-                                        &entity_path.to_string(),
-                                        timestamp_ms,
-                                    );
-                                    re_log::debug!(
-                                        "WS click event published: entity={}, pos=({:.2}, {:.2}, {:.2})",
-                                        entity_path,
-                                        pos.x,
-                                        pos.y,
-                                        pos.z
-                                    );
-                                } else if let Some(lcm) = &lcm_publisher {
-                                    // Local mode: publish click via LCM
-                                    let click = click_event_from_ms(
-                                        [pos.x, pos.y, pos.z],
-                                        &entity_path.to_string(),
-                                        timestamp_ms,
-                                    );
-                                    match lcm.publish(&click) {
-                                        Ok(_) => {
-                                            re_log::debug!(
-                                                "LCM click event published: entity={}, pos=({:.2}, {:.2}, {:.2})",
-                                                entity_path,
-                                                pos.x,
-                                                pos.y,
-                                                pos.z
-                                            );
-                                        }
-                                        Err(err) => {
-                                            re_log::error!("Failed to publish LCM click event: {err}");
-                                        }
-                                    }
-                                }
+                                ws_publisher.send_click(
+                                    pos.x as f64,
+                                    pos.y as f64,
+                                    pos.z as f64,
+                                    &entity_path.to_string(),
+                                    timestamp_ms,
+                                );
+                                re_log::debug!(
+                                    "Click event published: entity={}, pos=({:.2}, {:.2}, {:.2})",
+                                    entity_path,
+                                    pos.x,
+                                    pos.y,
+                                    pos.z
+                                );
                             }
                             re_viewer::SelectionChangeItem::Entity { position: None, .. } => {
                                 no_position_count += 1;
