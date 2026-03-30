@@ -1,5 +1,5 @@
 /// Used by `eframe` to decide where to store the app state.
-pub const APP_ID: &str = "rerun";
+pub const APP_ID: &str = "dimos-viewer";
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -21,7 +21,7 @@ pub fn run_native_app(
 
     let native_options = eframe_options(force_wgpu_backend);
 
-    let window_title = "Rerun Viewer";
+    let window_title = "DimOS Viewer";
     eframe::run_native(
         window_title,
         native_options,

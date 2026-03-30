@@ -56,12 +56,25 @@ impl WsPublisher {
     ///
     /// The client connects to `url` (e.g. `ws://127.0.0.1:3030/ws`) and
     /// reconnects automatically whenever the connection drops.
+    ///
+    /// This spawns a dedicated background thread with its own tokio runtime,
+    /// so it works even when called from a non-async context (like the eframe UI).
     pub fn connect(url: String) -> Self {
         let (tx, rx) = mpsc::channel::<String>(256);
 
-        tokio::spawn(async move {
-            run_client(url, rx).await;
-        });
+        // Spawn a dedicated thread with its own tokio runtime.
+        // This allows WsPublisher to work from the eframe UI thread which
+        // doesn't have a tokio runtime.
+        std::thread::Builder::new()
+            .name("ws-publisher".to_string())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create tokio runtime for WsPublisher");
+                rt.block_on(run_client(url, rx));
+            })
+            .expect("failed to spawn WsPublisher thread");
 
         Self { tx }
     }

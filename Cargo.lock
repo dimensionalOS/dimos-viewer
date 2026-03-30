@@ -3116,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "dimos-viewer"
-version = "0.30.0-alpha.4"
+version = "0.30.0-alpha.6"
 dependencies = [
  "bincode",
  "clap",
