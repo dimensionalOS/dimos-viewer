@@ -26,7 +26,6 @@ rerun = { path = "../crates/top/rerun", default-features = false, features = [
   "server",
 ] }
 
-clap = { workspace = true, features = ["derive"] }
 bincode.workspace = true
 futures-util.workspace = true
 mimalloc.workspace = true

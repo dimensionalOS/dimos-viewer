@@ -17,8 +17,10 @@ static GLOBAL: re_memory::AccountingAllocator<mimalloc::MiMalloc> =
 
 /// Default WebSocket server URL
 const DEFAULT_WS_URL: &str = "ws://127.0.0.1:3030/ws";
+
 /// Minimum time between click events (debouncing)
 const CLICK_DEBOUNCE_MS: u64 = 100;
+
 /// Maximum rapid clicks before logging a warning
 const RAPID_CLICK_THRESHOLD: usize = 5;
 
@@ -36,9 +38,13 @@ impl eframe::App for DimosApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) { self.inner.save(storage); }
+
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] { self.inner.clear_color(visuals) }
+
     fn persist_egui_memory(&self) -> bool { self.inner.persist_egui_memory() }
+
     fn auto_save_interval(&self) -> Duration { self.inner.auto_save_interval() }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.inner.raw_input_hook(ctx, raw_input);
     }

@@ -7,6 +7,7 @@ Requires: dimos-lcm (PYTHONPATH=.../dimos-lcm/generated/python_lcm_msgs)
 import struct
 import sys
 
+
 def test_twist_encoding():
     """Verify Twist encoding matches Python LCM reference."""
     # This is what the Rust viewer now produces for Twist (no Header)
@@ -33,7 +34,7 @@ def test_twist_encoding():
     assert buf.hex() == expected_hex, f"Encoding mismatch:\n  got:    {buf.hex()}\n  expect: {expected_hex}"
 
     print("PASS: Twist encoding matches Python LCM reference (56 bytes)")
-    print(f"  Channel: /cmd_vel#geometry_msgs.Twist")
+    print("  Channel: /cmd_vel#geometry_msgs.Twist")
     print(f"  Hash:    0x{twist_hash:016x}")
 
 def test_channel_name():

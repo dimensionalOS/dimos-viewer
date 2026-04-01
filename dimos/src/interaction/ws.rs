@@ -41,7 +41,7 @@ pub enum WsEvent {
     Stop,
 }
 
-/// Sends `WsEvent`s (serialised to JSON) to a remote WebSocket server.
+/// Sends `WsEvent`s (serialized to JSON) to a remote WebSocket server.
 ///
 /// Maintains a persistent connection with automatic reconnection. The
 /// internal sender is `Clone`, so you can hand copies to multiple producers
@@ -143,7 +143,7 @@ async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
 
                 // Read task: consume incoming frames (ping → auto pong) so the
                 // server's keepalive pings get answered and the connection stays
-                // alive.  Exits when the server closes or an error occurs.
+                // alive. Exits when the server closes or an error occurs.
                 let mut read_handle = tokio::spawn(async move {
                     while let Some(frame) = reader.next().await {
                         match frame {
