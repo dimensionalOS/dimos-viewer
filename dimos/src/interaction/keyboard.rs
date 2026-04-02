@@ -296,16 +296,20 @@ impl KeyboardHandler {
         let (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z) = self.compute_twist();
         self.ws.send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z);
 
-        re_log::info!(
-            "Published twist: lin=({:.2},{:.2},{:.2}) ang=({:.2},{:.2},{:.2})",
-            lin_x, lin_y, lin_z, ang_x, ang_y, ang_z
-        );
+        if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
+            re_log::info!(
+                "Published twist: lin=({:.2},{:.2},{:.2}) ang=({:.2},{:.2},{:.2})",
+                lin_x, lin_y, lin_z, ang_x, ang_y, ang_z
+            );
+        }
     }
 
     /// Publish all-zero twist (stop command) via WebSocket.
     fn publish_stop(&mut self) {
         self.ws.send_stop();
-        re_log::info!("Published stop command");
+        if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
+            re_log::info!("Published stop command");
+        }
     }
 
     /// Map KeyState to linear/angular velocities.

@@ -127,29 +127,48 @@ impl WsPublisher {
     }
 }
 
+/// Returns true if `DIMOS_DEBUG` is set to `1`.
+fn is_debug() -> bool {
+    std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1")
+}
+
 /// Background task: connect → send → reconnect loop.
 async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+    let debug = is_debug();
+
     loop {
-        re_log::info!("WsPublisher: connecting to {url}");
+        if debug {
+            re_log::info!("WsPublisher: connecting to {url}");
+        }
 
         match connect_async(&url).await {
             Ok((ws_stream, _)) => {
-                re_log::info!("WsPublisher: connected to {url}");
+                if debug {
+                    re_log::info!("WsPublisher: connected to {url}");
+                }
 
                 let (mut writer, mut reader) = ws_stream.split();
 
                 // Read task: consume incoming frames (ping → auto pong) so the
                 // server's keepalive pings get answered and the connection stays
                 // alive. Exits when the server closes or an error occurs.
+                let debug_read = debug;
                 let mut read_handle = tokio::spawn(async move {
                     while let Some(frame) = reader.next().await {
                         match frame {
-                            Ok(Message::Close(_)) => break,
+                            Ok(Message::Close(_)) => {
+                                if debug_read {
+                                    re_log::info!("WsPublisher: server sent close frame");
+                                }
+                                break;
+                            }
                             Err(err) => {
-                                re_log::debug!("WsPublisher: read error: {err}");
+                                if debug_read {
+                                    re_log::debug!("WsPublisher: read error: {err}");
+                                }
                                 break;
                             }
                             _ => {} // Ping/Pong handled by tungstenite internally
@@ -164,7 +183,9 @@ async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
                             match msg {
                                 Some(text) => {
                                     if let Err(err) = writer.send(Message::text(text)).await {
-                                        re_log::warn!("WsPublisher: send error: {err} — reconnecting");
+                                        if debug {
+                                            re_log::warn!("WsPublisher: send error: {err} — reconnecting");
+                                        }
                                         break false;
                                     }
                                 }
@@ -173,18 +194,25 @@ async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
                         }
                         _ = &mut read_handle => {
                             // Reader exited → server closed the connection.
-                            re_log::warn!("WsPublisher: server closed connection — reconnecting");
+                            if debug {
+                                re_log::warn!("WsPublisher: server closed connection — reconnecting");
+                            }
                             break false;
                         }
                     }
                 };
 
                 if disconnected {
+                    if debug {
+                        re_log::info!("WsPublisher: channel closed, shutting down");
+                    }
                     break;
                 }
             }
             Err(err) => {
-                re_log::debug!("WsPublisher: connection failed: {err} — retrying in 1s");
+                if debug {
+                    re_log::debug!("WsPublisher: connection failed: {err} — retrying in 1s");
+                }
             }
         }
 

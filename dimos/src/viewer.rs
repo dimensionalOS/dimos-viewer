@@ -70,9 +70,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         parsed.ws_url.clone()
     };
 
+    let debug = std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1");
+
     // Connect WebSocket publisher for click/keyboard events
     let ws_publisher = WsPublisher::connect(ws_url.clone());
-    re_log::info!("WebSocket client connecting to {ws_url}");
+    if debug {
+        re_log::info!("WebSocket client target: {ws_url}");
+    }
 
     let keyboard_handler_ws = ws_publisher.clone();
 
@@ -147,6 +151,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })),
     };
 
+    if debug {
+        if let Some(ref connect) = parsed.connect {
+            let url = connect.as_deref().unwrap_or("rerun+http://127.0.0.1:9876/proxy");
+            re_log::info!("gRPC connecting to: {url}");
+        } else {
+            re_log::info!("gRPC: starting local server on port {}", parsed.port);
+        }
+    }
+
     let wrapper: rerun::AppWrapper = Box::new(move |app| {
         let keyboard = KeyboardHandler::new(keyboard_handler_ws.clone());
         Ok(Box::new(DimosApp { inner: app, keyboard }))
@@ -160,6 +173,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(wrapper),
         Some(startup_patch),
     )?;
+
+    if debug {
+        re_log::info!("Viewer exited with code {exit_code}");
+    }
 
     std::process::exit(exit_code.into());
 }
