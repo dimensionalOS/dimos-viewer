@@ -196,6 +196,17 @@ When persisted, the state will be stored at the following locations:
     #[clap(long)]
     pub follow: bool,
 
+    /// WebSocket server URL for publishing viewer interaction events
+    /// (clicks, keyboard teleop commands).
+    ///
+    /// The viewer connects as a WebSocket client to this URL and sends
+    /// JSON events. Used by DimOS for click-to-navigate and WASD teleop.
+    ///
+    /// Also configurable via the DIMOS_VIEWER_WS_URL environment variable.
+    /// CLI flag takes priority over the environment variable.
+    #[clap(long, default_value = "ws://127.0.0.1:3030/ws")]
+    pub ws_url: String,
+
     /// The number of compute threads to use.
     ///
     /// If zero, the same number of threads as the number of cores will be used.

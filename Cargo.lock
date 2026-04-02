@@ -3119,6 +3119,7 @@ name = "dimos-viewer"
 version = "0.30.0-alpha.6"
 dependencies = [
  "bincode",
+ "clap",
  "futures-util",
  "mimalloc",
  "rerun",

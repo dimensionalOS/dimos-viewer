@@ -50,36 +50,27 @@ impl eframe::App for DimosApp {
     }
 }
 
-/// Extract `--ws-url <value>` from args, returning (ws_url, remaining_args).
-/// This lets us handle our custom flag without conflicting with Rerun's own arg parsing.
-fn extract_ws_url(args: Vec<String>) -> (Option<String>, Vec<String>) {
-    let mut ws_url = None;
-    let mut remaining = Vec::with_capacity(args.len());
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        if arg == "--ws-url" {
-            ws_url = iter.next();
-        } else if let Some(val) = arg.strip_prefix("--ws-url=") {
-            ws_url = Some(val.to_string());
-        } else {
-            remaining.push(arg);
-        }
-    }
-    (ws_url, remaining)
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let main_thread_token = re_viewer::MainThreadToken::i_promise_i_am_on_the_main_thread();
     let build_info = re_viewer::build_info();
 
-    // Extract --ws-url before passing remaining args to Rerun
-    let (ws_url_arg, rerun_args) = extract_ws_url(std::env::args().collect());
+    // Parse args (including --ws-url) via Rerun's clap Args, without consuming them.
+    // We peek at the parsed value, then pass the original args to run_with_app_wrapper
+    // which will parse them again.
+    let parsed: rerun::RerunArgs = clap::Parser::parse();
+    let ws_url = if std::env::var("DIMOS_VIEWER_WS_URL").is_ok() {
+        // Env var overrides default but not an explicit CLI flag.
+        // If the parsed value equals the default, check the env var.
+        if parsed.ws_url == DEFAULT_WS_URL {
+            std::env::var("DIMOS_VIEWER_WS_URL").unwrap()
+        } else {
+            parsed.ws_url.clone()
+        }
+    } else {
+        parsed.ws_url.clone()
+    };
 
     // Connect WebSocket publisher for click/keyboard events
-    // Priority: --ws-url flag > DIMOS_VIEWER_WS_URL env var > default
-    let ws_url = ws_url_arg
-        .or_else(|| std::env::var("DIMOS_VIEWER_WS_URL").ok())
-        .unwrap_or_else(|| DEFAULT_WS_URL.to_string());
     let ws_publisher = WsPublisher::connect(ws_url.clone());
     re_log::info!("WebSocket client connecting to {ws_url}");
 
@@ -165,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         main_thread_token,
         build_info,
         rerun::CallSource::Cli,
-        rerun_args.into_iter(),
+        std::env::args(),
         Some(wrapper),
         Some(startup_patch),
     )?;
