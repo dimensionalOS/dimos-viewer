@@ -93,8 +93,8 @@ impl KeyboardHandler {
         // If not engaged, don't capture any keys
         if !self.engaged {
             if self.was_active {
-                if let Err(err) = self.publish_stop() {
-                    re_log::warn!("Failed to send stop on disengage: {err}");
+                if let Err(e) = self.publish_stop() {
+                    re_log::warn!("Failed to send stop on disengage: {e}");
                 }
                 self.was_active = false;
             }
@@ -107,8 +107,8 @@ impl KeyboardHandler {
         // Check for emergency stop (Space key pressed - one-shot action)
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.state.reset();
-            if let Err(err) = self.publish_stop() {
-                re_log::warn!("Failed to send emergency stop: {err}");
+            if let Err(e) = self.publish_stop() {
+                re_log::warn!("Failed to send emergency stop: {e}");
             }
             self.was_active = false;
             self.estop_flash = true;
@@ -117,13 +117,13 @@ impl KeyboardHandler {
 
         // Publish twist command if keys are active, or stop if just released
         if self.state.any_active() {
-            if let Err(err) = self.publish_twist() {
-                re_log::warn!("Failed to publish twist command: {err}");
+            if let Err(e) = self.publish_twist() {
+                re_log::warn!("Failed to publish twist command: {e}");
             }
             self.was_active = true;
         } else if self.was_active {
-            if let Err(err) = self.publish_stop() {
-                re_log::warn!("Failed to send stop on key release: {err}");
+            if let Err(e) = self.publish_stop() {
+                re_log::warn!("Failed to send stop on key release: {e}");
             }
             self.was_active = false;
         }

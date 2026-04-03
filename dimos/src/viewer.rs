@@ -155,8 +155,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if debug {
         if let Some(ref connect) = parsed.connect {
-            let url = connect.as_deref().unwrap_or("rerun+http://127.0.0.1:9876/proxy");
-            eprintln!("[DIMOS_DEBUG] gRPC connecting to: {url}");
+            match connect.as_deref() {
+                Some(url) => eprintln!("[DIMOS_DEBUG] gRPC connecting to: {url}"),
+                None => eprintln!("[DIMOS_DEBUG] gRPC connecting to default (port {})", parsed.port),
+            }
         } else {
             eprintln!("[DIMOS_DEBUG] gRPC: starting local server on port {}", parsed.port);
         }
