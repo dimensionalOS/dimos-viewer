@@ -34,8 +34,8 @@ impl InteractionHandle {
             is_2d,
         };
 
-        if let Err(err) = self.tx.send(event) {
-            eprintln!("Failed to send click event: {}", err);
+        if let Err(e) = self.tx.send(event) {
+            eprintln!("Failed to send click event: {}", e);
         }
     }
 }
