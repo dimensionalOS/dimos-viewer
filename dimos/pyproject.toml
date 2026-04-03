@@ -4,22 +4,22 @@ build-backend = "maturin"
 
 [project]
 name = "dimos-viewer"
-version = "0.30.1"
+version = "0.30.0a6"
 description = "Interactive Rerun viewer for DimOS with click-to-navigate support"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT OR Apache-2.0" }
-authors = [{ name = "Dimensional Inc.", email = "engineering@dimensional.com" }]
+license = {text = "MIT OR Apache-2.0"}
+authors = [{name = "Dimensional Inc.", email = "engineering@dimensional.com"}]
 classifiers = [
-  "Development Status :: 4 - Beta",
-  "Intended Audience :: Developers",
-  "Topic :: Scientific/Engineering",
-  "Topic :: Scientific/Engineering :: Visualization",
-  "Programming Language :: Rust",
-  "License :: OSI Approved :: MIT License",
-  "License :: OSI Approved :: Apache Software License",
-  "Operating System :: POSIX :: Linux",
-  "Operating System :: MacOS",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
 ]
 
 [project.urls]
