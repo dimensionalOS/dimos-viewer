@@ -93,7 +93,9 @@ impl KeyboardHandler {
         // If not engaged, don't capture any keys
         if !self.engaged {
             if self.was_active {
-                self.publish_stop();
+                if let Err(err) = self.publish_stop() {
+                    re_log::warn!("Failed to send stop on disengage: {err}");
+                }
                 self.was_active = false;
             }
             return false;
@@ -105,7 +107,9 @@ impl KeyboardHandler {
         // Check for emergency stop (Space key pressed - one-shot action)
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.state.reset();
-            self.publish_stop();
+            if let Err(err) = self.publish_stop() {
+                re_log::warn!("Failed to send emergency stop: {err}");
+            }
             self.was_active = false;
             self.estop_flash = true;
             return true; // return true so overlay shows the e-stop flash
@@ -113,10 +117,14 @@ impl KeyboardHandler {
 
         // Publish twist command if keys are active, or stop if just released
         if self.state.any_active() {
-            self.publish_twist();
+            if let Err(err) = self.publish_twist() {
+                re_log::warn!("Failed to publish twist command: {err}");
+            }
             self.was_active = true;
         } else if self.was_active {
-            self.publish_stop();
+            if let Err(err) = self.publish_stop() {
+                re_log::warn!("Failed to send stop on key release: {err}");
+            }
             self.was_active = false;
         }
 
@@ -175,7 +183,9 @@ impl KeyboardHandler {
                     self.engaged = !self.engaged;
                     if !self.engaged {
                         // Send stop when disengaging
-                        self.publish_stop();
+                        if let Err(err) = self.publish_stop() {
+                            re_log::warn!("Failed to send stop on disengage: {err}");
+                        }
                         self.state.reset();
                         self.was_active = false;
                     }
@@ -189,7 +199,9 @@ impl KeyboardHandler {
             && ctx.input(|i| i.pointer.primary_clicked())
         {
             self.engaged = false;
-            self.publish_stop();
+            if let Err(err) = self.publish_stop() {
+                re_log::warn!("Failed to send stop on outside click: {err}");
+            }
             self.state.reset();
             self.was_active = false;
         }
@@ -292,9 +304,9 @@ impl KeyboardHandler {
     }
 
     /// Convert current KeyState to Twist and publish via WebSocket.
-    fn publish_twist(&mut self) {
+    fn publish_twist(&mut self) -> Result<(), super::ws::SendError> {
         let (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z) = self.compute_twist();
-        self.ws.send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z);
+        self.ws.send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z)?;
 
         if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
             eprintln!(
@@ -302,14 +314,16 @@ impl KeyboardHandler {
                 lin_x, lin_y, lin_z, ang_x, ang_y, ang_z
             );
         }
+        Ok(())
     }
 
     /// Publish all-zero twist (stop command) via WebSocket.
-    fn publish_stop(&mut self) {
-        self.ws.send_stop();
+    fn publish_stop(&mut self) -> Result<(), super::ws::SendError> {
+        self.ws.send_stop()?;
         if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
             eprintln!("[DIMOS_DEBUG] Published stop command");
         }
+        Ok(())
     }
 
     /// Map KeyState to linear/angular velocities.

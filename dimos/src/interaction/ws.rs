@@ -19,6 +19,24 @@ use rerun::external::re_log;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
+/// Error returned when a WebSocket event cannot be sent.
+#[derive(Debug)]
+pub enum SendError {
+    /// The send queue is full; the event was dropped.
+    QueueFull,
+    /// Failed to serialize the event to JSON.
+    Serialize(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueueFull => write!(f, "send queue full, event dropped"),
+            Self::Serialize(e) => write!(f, "serialization error: {e}"),
+        }
+    }
+}
+
 /// JSON message variants sent over the WebSocket.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -80,7 +98,7 @@ impl WsPublisher {
     }
 
     /// Publish a click event.
-    pub fn send_click(&self, x: f64, y: f64, z: f64, entity_path: &str, timestamp_ms: u64) {
+    pub fn send_click(&self, x: f64, y: f64, z: f64, entity_path: &str, timestamp_ms: u64) -> Result<(), SendError> {
         let event = WsEvent::Click {
             x,
             y,
@@ -88,7 +106,7 @@ impl WsPublisher {
             entity_path: entity_path.to_string(),
             timestamp_ms,
         };
-        self.broadcast(event);
+        self.broadcast(event)
     }
 
     /// Publish a twist (velocity) command.
@@ -100,7 +118,7 @@ impl WsPublisher {
         angular_x: f64,
         angular_y: f64,
         angular_z: f64,
-    ) {
+    ) -> Result<(), SendError> {
         let event = WsEvent::Twist {
             linear_x,
             linear_y,
@@ -109,21 +127,18 @@ impl WsPublisher {
             angular_y,
             angular_z,
         };
-        self.broadcast(event);
+        self.broadcast(event)
     }
 
     /// Publish a stop command.
-    pub fn send_stop(&self) {
-        self.broadcast(WsEvent::Stop);
+    pub fn send_stop(&self) -> Result<(), SendError> {
+        self.broadcast(WsEvent::Stop)
     }
 
-    fn broadcast(&self, event: WsEvent) {
-        if let Ok(json) = serde_json::to_string(&event) {
-            // Non-blocking: drop message if the channel is full rather than block the UI thread.
-            if self.tx.try_send(json).is_err() {
-                re_log::warn!("WsPublisher: send queue full, dropped event");
-            }
-        }
+    fn broadcast(&self, event: WsEvent) -> Result<(), SendError> {
+        let json = serde_json::to_string(&event).map_err(|e| SendError::Serialize(e.to_string()))?;
+        // Non-blocking: error if the channel is full rather than block the UI thread.
+        self.tx.try_send(json).map_err(|_| SendError::QueueFull)
     }
 }
 

@@ -123,13 +123,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .unwrap_or_default()
                                 .as_millis() as u64;
 
-                            ws_publisher.send_click(
+                            if let Err(err) = ws_publisher.send_click(
                                 pos.x as f64,
                                 pos.y as f64,
                                 pos.z as f64,
                                 &entity_path.to_string(),
                                 timestamp_ms,
-                            );
+                            ) {
+                                re_log::warn!("Failed to send click event: {err}");
+                            }
                             re_log::debug!(
                                 "Click event published: entity={}, pos=({:.2}, {:.2}, {:.2})",
                                 entity_path, pos.x, pos.y, pos.z
