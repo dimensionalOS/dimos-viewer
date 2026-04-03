@@ -178,9 +178,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(startup_patch),
     )?;
 
-    if debug {
-        re_log::info!("Viewer exited with code {exit_code}");
-    }
-
     std::process::exit(exit_code.into());
 }
