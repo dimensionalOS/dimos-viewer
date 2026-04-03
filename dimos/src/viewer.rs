@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connect WebSocket publisher for click/keyboard events
     let ws_publisher = WsPublisher::connect(ws_url.clone());
     if debug {
-        re_log::info!("WebSocket client target: {ws_url}");
+        eprintln!("[DIMOS_DEBUG] WebSocket client target: {ws_url}");
     }
 
     let keyboard_handler_ws = ws_publisher.clone();
@@ -154,9 +154,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if debug {
         if let Some(ref connect) = parsed.connect {
             let url = connect.as_deref().unwrap_or("rerun+http://127.0.0.1:9876/proxy");
-            re_log::info!("gRPC connecting to: {url}");
+            eprintln!("[DIMOS_DEBUG] gRPC connecting to: {url}");
         } else {
-            re_log::info!("gRPC: starting local server on port {}", parsed.port);
+            eprintln!("[DIMOS_DEBUG] gRPC: starting local server on port {}", parsed.port);
         }
     }
 

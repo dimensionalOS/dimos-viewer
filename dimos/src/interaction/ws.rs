@@ -141,13 +141,13 @@ async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
 
     loop {
         if debug {
-            re_log::info!("WsPublisher: connecting to {url}");
+            eprintln!("[DIMOS_DEBUG] WsPublisher: connecting to {url}");
         }
 
         match connect_async(&url).await {
             Ok((ws_stream, _)) => {
                 if debug {
-                    re_log::info!("WsPublisher: connected to {url}");
+                    eprintln!("[DIMOS_DEBUG] WsPublisher: connected to {url}");
                 }
 
                 let (mut writer, mut reader) = ws_stream.split();
@@ -161,13 +161,13 @@ async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
                         match frame {
                             Ok(Message::Close(_)) => {
                                 if debug_read {
-                                    re_log::info!("WsPublisher: server sent close frame");
+                                    eprintln!("[DIMOS_DEBUG] WsPublisher: server sent close frame");
                                 }
                                 break;
                             }
                             Err(err) => {
                                 if debug_read {
-                                    re_log::debug!("WsPublisher: read error: {err}");
+                                    eprintln!("[DIMOS_DEBUG] WsPublisher: read error: {err}");
                                 }
                                 break;
                             }
@@ -184,7 +184,7 @@ async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
                                 Some(text) => {
                                     if let Err(err) = writer.send(Message::text(text)).await {
                                         if debug {
-                                            re_log::warn!("WsPublisher: send error: {err} — reconnecting");
+                                            eprintln!("[DIMOS_DEBUG] WsPublisher: send error: {err} — reconnecting");
                                         }
                                         break false;
                                     }
@@ -195,7 +195,7 @@ async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
                         _ = &mut read_handle => {
                             // Reader exited → server closed the connection.
                             if debug {
-                                re_log::warn!("WsPublisher: server closed connection — reconnecting");
+                                eprintln!("[DIMOS_DEBUG] WsPublisher: server closed connection — reconnecting");
                             }
                             break false;
                         }
@@ -204,14 +204,14 @@ async fn run_client(url: String, mut rx: mpsc::Receiver<String>) {
 
                 if disconnected {
                     if debug {
-                        re_log::info!("WsPublisher: channel closed, shutting down");
+                        eprintln!("[DIMOS_DEBUG] WsPublisher: channel closed, shutting down");
                     }
                     break;
                 }
             }
             Err(err) => {
                 if debug {
-                    re_log::debug!("WsPublisher: connection failed: {err} — retrying in 1s");
+                    eprintln!("[DIMOS_DEBUG] WsPublisher: connection failed: {err} — retrying in 1s");
                 }
             }
         }
