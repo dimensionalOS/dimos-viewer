@@ -65,6 +65,7 @@ repository = "https://github.com/rerun-io/rerun"
 
 [project.scripts]
 rerun = "rerun_cli.__main__:main"
+dimos-viewer = "rerun_cli.__main__:main"
 
 
 ######################
