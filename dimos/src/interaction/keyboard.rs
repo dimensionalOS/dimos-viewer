@@ -1,17 +1,13 @@
 //! Keyboard handler for WASD movement controls that publish Twist messages.
-//! 
+//!
 //! Converts keyboard input to robot velocity commands following teleop conventions:
 //! - WASD/arrows for linear/angular motion
 //! - QE for strafing
 //! - Space for emergency stop
 //! - Shift for speed multiplier
 
-use std::io;
-use super::lcm::{LcmPublisher, twist_command};
+use super::ws::WsPublisher;
 use rerun::external::{egui, re_log};
-
-/// LCM channel for twist commands (matches DimOS convention)
-const CMD_VEL_CHANNEL: &str = "/cmd_vel#geometry_msgs.Twist";
 
 /// Base speeds for keyboard control
 const BASE_LINEAR_SPEED: f64 = 0.5;   // m/s
@@ -64,10 +60,10 @@ impl KeyState {
     }
 }
 
-/// Handles keyboard input and publishes Twist via LCM.
+/// Handles keyboard input and publishes Twist via WebSocket.
 /// Must be activated by clicking the overlay before keys are captured.
 pub struct KeyboardHandler {
-    publisher: LcmPublisher,
+    ws: WsPublisher,
     state: KeyState,
     was_active: bool,
     estop_flash: bool,  // true briefly after space pressed
@@ -75,16 +71,15 @@ pub struct KeyboardHandler {
 }
 
 impl KeyboardHandler {
-    /// Create a new keyboard handler with LCM publisher on CMD_VEL_CHANNEL.
-    pub fn new() -> Result<Self, io::Error> {
-        let publisher = LcmPublisher::new(CMD_VEL_CHANNEL.to_string())?;
-        Ok(Self {
-            publisher,
+    /// Create a new keyboard handler that publishes twist commands via WebSocket.
+    pub fn new(ws: WsPublisher) -> Self {
+        Self {
+            ws,
             state: KeyState::new(),
             was_active: false,
             estop_flash: false,
             engaged: false,
-        })
+        }
     }
 
     /// Process keyboard input from egui and publish Twist if keys are held.
@@ -99,7 +94,7 @@ impl KeyboardHandler {
         if !self.engaged {
             if self.was_active {
                 if let Err(e) = self.publish_stop() {
-                    re_log::warn!("Failed to send stop on disengage: {e:?}");
+                    re_log::warn!("Failed to send stop on disengage: {e}");
                 }
                 self.was_active = false;
             }
@@ -113,7 +108,7 @@ impl KeyboardHandler {
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.state.reset();
             if let Err(e) = self.publish_stop() {
-                re_log::warn!("Failed to send emergency stop: {e:?}");
+                re_log::warn!("Failed to send emergency stop: {e}");
             }
             self.was_active = false;
             self.estop_flash = true;
@@ -123,12 +118,12 @@ impl KeyboardHandler {
         // Publish twist command if keys are active, or stop if just released
         if self.state.any_active() {
             if let Err(e) = self.publish_twist() {
-                re_log::warn!("Failed to publish twist command: {e:?}");
+                re_log::warn!("Failed to publish twist command: {e}");
             }
             self.was_active = true;
         } else if self.was_active {
             if let Err(e) = self.publish_stop() {
-                re_log::warn!("Failed to send stop on key release: {e:?}");
+                re_log::warn!("Failed to send stop on key release: {e}");
             }
             self.was_active = false;
         }
@@ -188,8 +183,8 @@ impl KeyboardHandler {
                     self.engaged = !self.engaged;
                     if !self.engaged {
                         // Send stop when disengaging
-                        if let Err(e) = self.publish_stop() {
-                            re_log::warn!("Failed to send stop on disengage: {e:?}");
+                        if let Err(err) = self.publish_stop() {
+                            re_log::warn!("Failed to send stop on disengage: {err}");
                         }
                         self.state.reset();
                         self.was_active = false;
@@ -204,8 +199,8 @@ impl KeyboardHandler {
             && ctx.input(|i| i.pointer.primary_clicked())
         {
             self.engaged = false;
-            if let Err(e) = self.publish_stop() {
-                re_log::warn!("Failed to send stop on outside click: {e:?}");
+            if let Err(err) = self.publish_stop() {
+                re_log::warn!("Failed to send stop on outside click: {err}");
             }
             self.state.reset();
             self.was_active = false;
@@ -308,30 +303,26 @@ impl KeyboardHandler {
         });
     }
 
-    /// Convert current KeyState to Twist and publish via LCM.
-    fn publish_twist(&mut self) -> io::Result<()> {
+    /// Convert current KeyState to Twist and publish via WebSocket.
+    fn publish_twist(&mut self) -> Result<(), super::ws::SendError> {
         let (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z) = self.compute_twist();
+        self.ws.send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z)?;
 
-        let cmd = twist_command(
-            [lin_x, lin_y, lin_z],
-            [ang_x, ang_y, ang_z],
-        );
-
-        self.publisher.publish_twist(&cmd)?;
-
-        re_log::trace!(
-            "Published twist: lin=({:.2},{:.2},{:.2}) ang=({:.2},{:.2},{:.2})",
-            lin_x, lin_y, lin_z, ang_x, ang_y, ang_z
-        );
-
+        if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "[DIMOS_DEBUG] Published twist: lin=({:.2},{:.2},{:.2}) ang=({:.2},{:.2},{:.2})",
+                lin_x, lin_y, lin_z, ang_x, ang_y, ang_z
+            );
+        }
         Ok(())
     }
 
-    /// Publish all-zero twist (stop command)
-    fn publish_stop(&mut self) -> io::Result<()> {
-        let cmd = twist_command([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
-        self.publisher.publish_twist(&cmd)?;
-        re_log::debug!("Published stop command");
+    /// Publish all-zero twist (stop command) via WebSocket.
+    fn publish_stop(&mut self) -> Result<(), super::ws::SendError> {
+        self.ws.send_stop()?;
+        if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
+            eprintln!("[DIMOS_DEBUG] Published stop command");
+        }
         Ok(())
     }
 
@@ -382,6 +373,23 @@ impl std::fmt::Debug for KeyboardHandler {
 mod tests {
     use super::*;
 
+    /// Create a dummy WsPublisher for tests (connects to a non-existent server,
+    /// which is fine — we only test compute_twist, never actually send).
+    fn test_ws() -> WsPublisher {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { WsPublisher::connect("ws://127.0.0.1:1/test".to_string()) })
+    }
+
+    fn handler_with(state: KeyState) -> KeyboardHandler {
+        KeyboardHandler {
+            ws: test_ws(),
+            state,
+            was_active: false,
+            estop_flash: false,
+            engaged: true,
+        }
+    }
+
     #[test]
     fn test_key_state_any_active() {
         let mut state = KeyState::new();
@@ -401,13 +409,7 @@ mod tests {
     fn test_wasd_to_twist_mapping() {
         let mut state = KeyState::new();
         state.forward = true;
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state,
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(state);
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, BASE_LINEAR_SPEED);
         assert_eq!(lin_y, 0.0);
@@ -418,13 +420,7 @@ mod tests {
     fn test_turn_left_right_mapping() {
         let mut state = KeyState::new();
         state.left = true;
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state,
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(state);
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
         assert_eq!(lin_y, 0.0);
@@ -432,13 +428,7 @@ mod tests {
 
         let mut state = KeyState::new();
         state.right = true;
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state,
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(state);
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
         assert_eq!(lin_y, 0.0);
@@ -449,13 +439,7 @@ mod tests {
     fn test_strafe_mapping() {
         let mut state = KeyState::new();
         state.strafe_l = true;
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state,
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(state);
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
         assert_eq!(lin_y, BASE_LINEAR_SPEED);
@@ -463,13 +447,7 @@ mod tests {
 
         let mut state = KeyState::new();
         state.strafe_r = true;
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state,
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(state);
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
         assert_eq!(lin_y, -BASE_LINEAR_SPEED);
@@ -481,13 +459,7 @@ mod tests {
         let mut state = KeyState::new();
         state.forward = true;
         state.fast = true;
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state,
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(state);
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, BASE_LINEAR_SPEED * FAST_MULTIPLIER);
         assert_eq!(lin_y, 0.0);
@@ -499,13 +471,7 @@ mod tests {
         let mut state = KeyState::new();
         state.forward = true;
         state.left = true;
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state,
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(state);
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, BASE_LINEAR_SPEED);
         assert_eq!(lin_y, 0.0);
@@ -528,9 +494,7 @@ mod tests {
 
     #[test]
     fn test_keyboard_handler_creation() {
-        let handler = KeyboardHandler::new();
-        assert!(handler.is_ok());
-        let handler = handler.unwrap();
+        let handler = KeyboardHandler::new(test_ws());
         assert!(!handler.was_active);
         assert!(!handler.engaged);
         assert!(!handler.state.any_active());
@@ -541,13 +505,7 @@ mod tests {
         let mut state = KeyState::new();
         state.forward = true;
         state.backward = true;
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state,
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(state);
         let (lin_x, lin_y, _, _, _, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
         assert_eq!(lin_y, 0.0);
@@ -556,13 +514,7 @@ mod tests {
 
     #[test]
     fn test_compute_twist_all_zeros() {
-        let handler = KeyboardHandler {
-            publisher: LcmPublisher::new("/test".to_string()).unwrap(),
-            state: KeyState::new(),
-            was_active: false,
-            estop_flash: false,
-            engaged: true,
-        };
+        let handler = handler_with(KeyState::new());
         let (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z) = handler.compute_twist();
         assert_eq!(lin_x, 0.0);
         assert_eq!(lin_y, 0.0);

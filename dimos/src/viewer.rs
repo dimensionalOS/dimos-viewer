@@ -1,24 +1,26 @@
-//! DimOS Interactive Viewer — custom Rerun viewer with LCM click-to-navigate and WASD teleop.
+//! DimOS Interactive Viewer — custom Rerun viewer with WebSocket click-to-navigate and WASD teleop.
 //!
 //! Accepts ALL stock Rerun CLI flags and adds DimOS-specific behavior:
-//! - Click-to-navigate: click any entity with a 3D position → PointStamped LCM on /clicked_point
-//! - WASD keyboard teleop: click overlay to engage, then WASD publishes Twist on /cmd_vel
+//! - Click-to-navigate: click any entity with a 3D position → sends click event via WebSocket
+//! - WASD keyboard teleop: click overlay to engage, then WASD publishes Twist via WebSocket
 
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use dimos_viewer::interaction::{KeyboardHandler, LcmPublisher, click_event_from_ms};
-use rerun::external::{eframe, egui, re_memory, re_viewer};
+use dimos_viewer::interaction::{KeyboardHandler, WsPublisher};
+use rerun::external::{eframe, egui, re_log, re_memory, re_viewer};
 
 #[global_allocator]
 static GLOBAL: re_memory::AccountingAllocator<mimalloc::MiMalloc> =
     re_memory::AccountingAllocator::new(mimalloc::MiMalloc);
 
-/// LCM channel for click events (follows RViz convention)
-const LCM_CHANNEL: &str = "/clicked_point#geometry_msgs.PointStamped";
+/// Default WebSocket server URL
+const DEFAULT_WS_URL: &str = "ws://127.0.0.1:3030/ws";
+
 /// Minimum time between click events (debouncing)
 const CLICK_DEBOUNCE_MS: u64 = 100;
+
 /// Maximum rapid clicks before logging a warning
 const RAPID_CLICK_THRESHOLD: usize = 5;
 
@@ -36,9 +38,13 @@ impl eframe::App for DimosApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) { self.inner.save(storage); }
+
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] { self.inner.clear_color(visuals) }
+
     fn persist_egui_memory(&self) -> bool { self.inner.persist_egui_memory() }
+
     fn auto_save_interval(&self) -> Duration { self.inner.auto_save_interval() }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.inner.raw_input_hook(ctx, raw_input);
     }
@@ -48,8 +54,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let main_thread_token = re_viewer::MainThreadToken::i_promise_i_am_on_the_main_thread();
     let build_info = re_viewer::build_info();
 
-    let lcm_publisher = LcmPublisher::new(LCM_CHANNEL.to_string())
-        .expect("Failed to create LCM publisher");
+    // Parse args (including --ws-url) via Rerun's clap Args, without consuming them.
+    // We peek at the parsed value, then pass the original args to run_with_app_wrapper
+    // which will parse them again.
+    let parsed: rerun::RerunArgs = clap::Parser::parse();
+    let ws_url = if std::env::var("DIMOS_VIEWER_WS_URL").is_ok() {
+        // Env var overrides default but not an explicit CLI flag.
+        // If the parsed value equals the default, check the env var.
+        if parsed.ws_url == DEFAULT_WS_URL {
+            std::env::var("DIMOS_VIEWER_WS_URL").unwrap()
+        } else {
+            parsed.ws_url.clone()
+        }
+    } else {
+        parsed.ws_url.clone()
+    };
+
+    let debug = std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1");
+
+    // Connect WebSocket publisher for click/keyboard events
+    let ws_publisher = WsPublisher::connect(ws_url.clone());
+    if debug {
+        eprintln!("[DIMOS_DEBUG] WebSocket client target: {ws_url}");
+    }
+
+    let keyboard_handler_ws = ws_publisher.clone();
 
     let last_click_time = Rc::new(RefCell::new(
         Instant::now() - Duration::from_secs(10)
@@ -79,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let mut count = rapid_click_count.borrow_mut();
                                 *count += 1;
                                 if *count == RAPID_CLICK_THRESHOLD {
-                                    rerun::external::re_log::warn!(
+                                    re_log::warn!(
                                         "Rapid click detected ({RAPID_CLICK_THRESHOLD} clicks within {CLICK_DEBOUNCE_MS}ms)"
                                     );
                                 }
@@ -89,26 +118,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             *last_click_time.borrow_mut() = now;
 
-                            let ts = SystemTime::now()
+                            let timestamp_ms = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as u64;
 
-                            let click = click_event_from_ms(
-                                [pos.x, pos.y, pos.z],
+                            if let Err(err) = ws_publisher.send_click(
+                                pos.x as f64,
+                                pos.y as f64,
+                                pos.z as f64,
                                 &entity_path.to_string(),
-                                ts,
-                            );
-
-                            match lcm_publisher.publish(&click) {
-                                Ok(_) => rerun::external::re_log::debug!(
-                                    "Nav goal: entity={}, pos=({:.2}, {:.2}, {:.2})",
-                                    entity_path, pos.x, pos.y, pos.z
-                                ),
-                                Err(e) => rerun::external::re_log::error!(
-                                    "Failed to publish nav goal: {e:?}"
-                                ),
+                                timestamp_ms,
+                            ) {
+                                re_log::warn!("Failed to send click event: {err}");
                             }
+                            re_log::debug!(
+                                "Click event published: entity={}, pos=({:.2}, {:.2}, {:.2})",
+                                entity_path, pos.x, pos.y, pos.z
+                            );
                         }
                         re_viewer::SelectionChangeItem::Entity { position: None, .. } => {
                             no_position_count += 1;
@@ -118,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if !has_position && no_position_count > 0 {
-                    rerun::external::re_log::trace!(
+                    re_log::trace!(
                         "Selection change without position ({no_position_count} items) — normal for hover/keyboard nav."
                     );
                 }
@@ -126,9 +153,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })),
     };
 
+    if debug {
+        if let Some(ref connect) = parsed.connect {
+            match connect.as_deref() {
+                Some(url) => eprintln!("[DIMOS_DEBUG] gRPC connecting to: {url}"),
+                None => eprintln!("[DIMOS_DEBUG] gRPC connecting to default (port {})", parsed.port),
+            }
+        } else {
+            eprintln!("[DIMOS_DEBUG] gRPC: starting local server on port {}", parsed.port);
+        }
+    }
+
     let wrapper: rerun::AppWrapper = Box::new(move |app| {
-        let keyboard = KeyboardHandler::new()
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+        let keyboard = KeyboardHandler::new(keyboard_handler_ws.clone());
         Ok(Box::new(DimosApp { inner: app, keyboard }))
     });
 
