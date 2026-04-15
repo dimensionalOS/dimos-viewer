@@ -1,7 +1,7 @@
 use re_entity_db::InstancePathHash;
 use re_log_types::Instance;
 use re_renderer::renderer::{GpuMeshInstance, LineStripFlags};
-use re_renderer::{PickingLayerInstanceId, RenderContext};
+use re_renderer::{Box3DBuilder, PickingLayerInstanceId, RenderContext};
 use re_sdk_types::ComponentIdentifier;
 use re_sdk_types::components::{self, FillMode};
 use re_tf::convert;
@@ -30,6 +30,11 @@ pub struct ProcMeshDrawableBuilder<'ctx> {
 
     /// Accumulates triangle mesh instances to render.
     pub solid_instances: Vec<GpuMeshInstance>,
+
+    /// Shader-synthesized solid-box fast path (see `box3d.rs` in `re_renderer`).
+    ///
+    /// Only used when `Boxes3D` routes through [`ProcMeshDrawableBuilder::add_solid_boxes_fast_path`].
+    pub box3d_builder: Box3DBuilder<'ctx>,
 
     pub query: &'ctx ViewQuery<'ctx>,
     pub render_ctx: &'ctx RenderContext,
@@ -137,9 +142,193 @@ impl<'ctx> ProcMeshDrawableBuilder<'ctx> {
             line_builder,
             line_batch_debug_label: line_batch_debug_label.into(),
             solid_instances: Vec::new(),
+            box3d_builder: Box3DBuilder::new(render_ctx),
             query: view_query,
             render_ctx,
         }
+    }
+
+    /// Returns true if `target_from_poses` carries only uniform scale, which is a
+    /// precondition for the fast-path box renderer (which only sends a quaternion +
+    /// half-size to the GPU, not a full affine transform).
+    fn target_from_poses_are_uniform_scale(
+        target_from_poses: &SmallVec1<[glam::DAffine3; 1]>,
+    ) -> bool {
+        const TOLERANCE: f64 = 1e-4;
+        target_from_poses.iter().all(|t| {
+            let sx = t.matrix3.x_axis.length();
+            let sy = t.matrix3.y_axis.length();
+            let sz = t.matrix3.z_axis.length();
+            (sx - sy).abs() < TOLERANCE * sx.max(1.0) && (sy - sz).abs() < TOLERANCE * sy.max(1.0)
+        })
+    }
+
+    /// Fast path for solid `Boxes3D` with uniform-scale entity transforms.
+    ///
+    /// Mirrors [`Self::add_batch`]'s `FillMode::Solid` arm but feeds a [`Box3DBuilder`]
+    /// rather than accumulating a [`GpuMeshInstance`] per box. Returns `false` when the
+    /// entity transform has non-uniform scale — caller must then fall back to
+    /// [`Self::add_batch`].
+    #[expect(clippy::needless_pass_by_value)]
+    pub fn add_solid_boxes_fast_path(
+        &mut self,
+        query_context: &QueryContext<'_>,
+        ent_context: &SpatialSceneVisualizerInstructionContext<'_>,
+        color_component: ComponentIdentifier,
+        show_labels_component: ComponentIdentifier,
+        batch: ProcMeshBatch<'_, impl Iterator<Item = ProcMeshKey>, impl Iterator<Item = FillMode>>,
+    ) -> bool {
+        let _ = batch.meshes;
+        let _ = batch.fill_modes;
+
+        let entity_path = query_context.target_entity_path;
+
+        if batch.half_sizes.is_empty() {
+            return true;
+        }
+
+        let target_from_poses = ent_context.transform_info.target_from_instances();
+        if !Self::target_from_poses_are_uniform_scale(target_from_poses) {
+            return false;
+        }
+
+        let target_from_instances = combine_instance_poses_with_archetype_transforms(
+            batch.half_sizes.len(),
+            target_from_poses,
+            batch.centers,
+            batch.rotation_axis_angles,
+            batch.quaternions,
+        );
+        let num_instances = target_from_instances.len();
+
+        re_tracing::profile_function_if!(10_000 < num_instances);
+
+        let half_sizes = clamped_or_nothing(batch.half_sizes, num_instances);
+
+        let annotation_infos = process_annotation_slices(
+            self.query.latest_at,
+            num_instances,
+            batch.class_ids,
+            &ent_context.annotations,
+        );
+
+        let colors = process_color_slice(
+            query_context,
+            color_component,
+            num_instances,
+            &annotation_infos,
+            batch.colors,
+        );
+
+        let mut centers = Vec::with_capacity(num_instances);
+        let mut half_sizes_vec = Vec::with_capacity(num_instances);
+        let mut quats = Vec::with_capacity(num_instances);
+        let mut picking_ids = Vec::with_capacity(num_instances);
+
+        let mut world_space_bounding_box = macaw::BoundingBox::nothing();
+
+        let proc_mesh_key = proc_mesh::ProcMeshKey::Cube;
+
+        for (instance_index, (half_size, transform)) in half_sizes
+            .zip(
+                target_from_instances
+                    .iter()
+                    .chain(std::iter::repeat(target_from_instances.last())),
+            )
+            .enumerate()
+        {
+            // Bounding box: same math as the slow path, including the unit-cube ×2 scale.
+            let world_from_instance = transform.as_affine3a()
+                * glam::Affine3A::from_scale(glam::Vec3::from(*half_size))
+                * glam::Affine3A::from_scale(glam::Vec3::splat(2.0));
+            world_space_bounding_box = world_space_bounding_box.union(
+                proc_mesh_key
+                    .simple_bounding_box()
+                    .transform_affine3(&world_from_instance),
+            );
+
+            // Decompose the (uniform-scale) affine into translation + rotation + scalar
+            // scale. Since all columns of matrix3 have equal length (guaranteed by the
+            // uniform-scale check above), we can use the x column's length as *the* scale.
+            let translation = transform.translation.as_vec3();
+            let m3 = transform.matrix3;
+            let scale = m3.x_axis.length() as f32;
+            let inv_scale = if scale > 1e-8 { 1.0 / scale } else { 0.0 };
+            let rot_m3 = glam::Mat3::from_cols(
+                (m3.x_axis.as_vec3()) * inv_scale,
+                (m3.y_axis.as_vec3()) * inv_scale,
+                (m3.z_axis.as_vec3()) * inv_scale,
+            );
+            let quat = glam::Quat::from_mat3(&rot_m3);
+
+            centers.push(translation);
+            // Absorb the instance-pose scale into half_size; shader maps half_size → box extent.
+            half_sizes_vec.push(glam::Vec3::from(*half_size) * scale);
+            quats.push(glam::Vec4::new(quat.x, quat.y, quat.z, quat.w));
+            picking_ids.push(PickingLayerInstanceId(instance_index as u64));
+        }
+
+        let instance_outline_overrides: Vec<(
+            std::ops::Range<u32>,
+            re_renderer::OutlineMaskPreference,
+        )> = (0..centers.len() as u32)
+            .filter_map(|idx| {
+                ent_context
+                    .highlight
+                    .instances
+                    .get(&Instance::from(idx as u64))
+                    .map(|mask| (idx..idx + 1, *mask))
+            })
+            .collect();
+
+        {
+            let mut batch_builder = self
+                .box3d_builder
+                .batch(self.line_batch_debug_label.clone())
+                .depth_offset(ent_context.depth_offset)
+                .outline_mask_ids(ent_context.highlight.overall)
+                .picking_object_id(re_renderer::PickingLayerObjectId(entity_path.hash64()));
+
+            for (range, mask) in instance_outline_overrides {
+                batch_builder =
+                    batch_builder.push_additional_outline_mask_ids_for_range(range, mask);
+            }
+
+            batch_builder.add_boxes(
+                &centers,
+                &half_sizes_vec,
+                &quats,
+                &colors,
+                &picking_ids,
+                &[],
+            );
+        }
+
+        self.data
+            .bounding_boxes
+            .push((entity_path.hash(), world_space_bounding_box));
+
+        self.data.ui_labels.extend(process_labels_3d(
+            LabeledBatch {
+                entity_path,
+                visualizer_instruction: ent_context.visualizer_instruction,
+                num_instances: centers.len(),
+                overall_position: world_space_bounding_box.center(),
+                instance_positions: target_from_instances
+                    .iter()
+                    .chain(std::iter::repeat(target_from_instances.last()))
+                    .map(|t| t.translation.as_vec3()),
+                labels: batch.labels,
+                colors: &colors,
+                show_labels: batch
+                    .show_labels
+                    .unwrap_or_else(|| typed_fallback_for(query_context, show_labels_component)),
+                annotation_infos: &annotation_infos,
+            },
+            glam::Affine3A::IDENTITY,
+        ));
+
+        true
     }
 
     /// Add a batch of data to be drawn.
@@ -332,6 +521,7 @@ impl<'ctx> ProcMeshDrawableBuilder<'ctx> {
             line_builder,
             line_batch_debug_label: _,
             solid_instances,
+            box3d_builder,
             query: _,
             render_ctx,
         } = self;
@@ -349,9 +539,20 @@ impl<'ctx> ProcMeshDrawableBuilder<'ctx> {
                 }
             };
 
-        Ok([solid_draw_data, Some(wireframe_draw_data)]
-            .into_iter()
-            .flatten()
-            .collect())
+        let box3d_draw_data: Option<re_renderer::QueueableDrawData> =
+            match box3d_builder.into_draw_data() {
+                Ok(draw_data) => Some(draw_data.into()),
+                Err(err) => {
+                    re_log::error_once!("Failed to create box3d draw data: {err}");
+                    None
+                }
+            };
+
+        Ok(
+            [solid_draw_data, box3d_draw_data, Some(wireframe_draw_data)]
+                .into_iter()
+                .flatten()
+                .collect(),
+        )
     }
 }

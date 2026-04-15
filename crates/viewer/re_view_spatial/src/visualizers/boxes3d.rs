@@ -46,25 +46,56 @@ impl Boxes3DVisualizer {
         let constant_instance_transform = glam::Affine3A::from_scale(glam::Vec3::splat(2.0));
 
         for batch in batches {
+            let proc_batch = ProcMeshBatch {
+                half_sizes: batch.half_sizes,
+                centers: batch.centers,
+                rotation_axis_angles: batch.rotation_axis_angles.as_slice(),
+                quaternions: batch.quaternions,
+                meshes: iter::repeat(proc_mesh_key),
+                fill_modes: iter::repeat(batch.fill_mode),
+                line_radii: batch.radii,
+                colors: batch.colors,
+                labels: &batch.labels,
+                show_labels: batch.show_labels,
+                class_ids: batch.class_ids,
+            };
+
+            // Fast path: shader-synthesized box geometry (see `re_renderer::Box3DBuilder`).
+            // Only taken when the entity transform has uniform scale. Other cases (and all
+            // wireframe fill modes) fall through to the generic `ProcMeshDrawableBuilder`
+            // path which allocates a `GpuMeshInstance` per box.
+            if batch.fill_mode == FillMode::Solid {
+                let handled = builder.add_solid_boxes_fast_path(
+                    query_context,
+                    ent_context,
+                    Boxes3D::descriptor_colors().component,
+                    Boxes3D::descriptor_show_labels().component,
+                    ProcMeshBatch {
+                        half_sizes: batch.half_sizes,
+                        centers: batch.centers,
+                        rotation_axis_angles: batch.rotation_axis_angles.as_slice(),
+                        quaternions: batch.quaternions,
+                        meshes: iter::repeat(proc_mesh_key),
+                        fill_modes: iter::repeat(batch.fill_mode),
+                        line_radii: batch.radii,
+                        colors: batch.colors,
+                        labels: &batch.labels,
+                        show_labels: batch.show_labels,
+                        class_ids: batch.class_ids,
+                    },
+                );
+                if handled {
+                    continue;
+                }
+            }
+
             builder.add_batch(
                 query_context,
                 ent_context,
                 Boxes3D::descriptor_colors().component,
                 Boxes3D::descriptor_show_labels().component,
                 constant_instance_transform,
-                ProcMeshBatch {
-                    half_sizes: batch.half_sizes,
-                    centers: batch.centers,
-                    rotation_axis_angles: batch.rotation_axis_angles.as_slice(),
-                    quaternions: batch.quaternions,
-                    meshes: iter::repeat(proc_mesh_key),
-                    fill_modes: iter::repeat(batch.fill_mode),
-                    line_radii: batch.radii,
-                    colors: batch.colors,
-                    labels: &batch.labels,
-                    show_labels: batch.show_labels,
-                    class_ids: batch.class_ids,
-                },
+                proc_batch,
             )?;
         }
 

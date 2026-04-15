@@ -30,6 +30,7 @@
 #![expect(clippy::unwrap_used)]
 
 mod allocator;
+mod box3d_builder;
 pub mod device_caps;
 pub mod importer;
 pub mod mesh;
@@ -92,6 +93,7 @@ pub use draw_phases::{
 };
 pub use resource_managers::AlphaChannelUsage;
 // Re-export used color types directly.
+pub use box3d_builder::{Box3DBatchBuilder, Box3DBuilder};
 pub use ecolor::{Color32, Hsva, Rgba};
 pub use global_bindings::GlobalBindings;
 pub use importer::{CpuMeshInstance, CpuModel, CpuModelMeshKey};

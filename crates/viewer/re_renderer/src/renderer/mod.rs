@@ -1,3 +1,4 @@
+mod box3d;
 mod compositor;
 mod debug_overlay;
 mod depth_cloud;
@@ -9,6 +10,9 @@ mod rectangles;
 mod test_triangle;
 mod world_grid;
 
+pub use box3d::{
+    Box3DBatchFlags, Box3DBatchInfo, Box3DDrawData, Box3DDrawDataError, Box3DRenderer,
+};
 pub use debug_overlay::{DebugOverlayDrawData, DebugOverlayError, DebugOverlayRenderer};
 pub use generic_skybox::{GenericSkyboxDrawData, GenericSkyboxType};
 pub use lines::{LineBatchInfo, LineDrawData, LineDrawDataError, LineStripFlags};
@@ -26,6 +30,7 @@ pub use world_grid::{WorldGridConfiguration, WorldGridDrawData, WorldGridRendere
 pub use self::depth_cloud::{DepthCloud, DepthCloudDrawData, DepthCloudRenderer, DepthClouds};
 
 pub mod gpu_data {
+    pub use super::box3d::gpu_data::{CenterRadius, HalfSize, Quaternion};
     pub use super::lines::gpu_data::{LineStripInfo, LineVertex};
     pub use super::point_cloud::gpu_data::PositionRadius;
 }
