@@ -31,6 +31,13 @@ struct DimosApp {
 }
 
 impl eframe::App for DimosApp {
+    /// Called before `ui` every frame (and on hidden repaints).
+    /// re_viewer::App drains log_receivers / ingests messages here, so we MUST
+    /// forward — otherwise the viewer's data pipeline stalls.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.inner.logic(ctx, frame);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.keyboard.process(ui.ctx());
         self.keyboard.draw_overlay(ui.ctx());
