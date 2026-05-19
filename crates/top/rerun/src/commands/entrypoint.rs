@@ -2130,6 +2130,7 @@ fn start_native_viewer_with_wrapper(
     startup_patch: Option<StartupOptionsPatch>,
 ) -> anyhow::Result<()> {
     use re_viewer::external::re_viewer_context;
+
     use crate::external::re_ui::{UICommand, UICommandSender as _};
 
     let mut startup_options = native_startup_options_from_args(args)?;
@@ -2142,10 +2143,18 @@ fn start_native_viewer_with_wrapper(
     let connect = args.connect.is_some();
     let follow = args.follow;
     let renderer = args.renderer.as_deref();
+    let memory_limit = args.memory_limit.clone();
 
     let (command_tx, command_rx) = re_viewer_context::command_channel();
+
     let auth_error_handler = re_viewer::App::auth_error_handler(command_tx.clone());
+
     let tokio_runtime_handle = tokio_runtime_handle.clone();
+
+    // Start catching `re_log::info/warn/error` messages
+    // so we can show them in the notification panel.
+    // In particular: create this before calling `run_native_app`
+    // so we catch any warnings produced during startup.
     let text_log_rx = re_viewer::register_text_log_receiver();
 
     re_viewer::run_native_app(
@@ -2155,9 +2164,11 @@ fn start_native_viewer_with_wrapper(
                 let tx = command_tx.clone();
                 let egui_ctx = cc.egui_ctx.clone();
                 tokio::spawn(async move {
+                    // We catch ctrl-c commands so we can properly quit.
+                    // Without this, recent state changes might not be persisted.
                     match tokio::signal::ctrl_c().await {
                         Ok(()) => {
-                            re_log::info!("Caught Ctrl-C, quitting…");
+                            re_log::info!("Caught Ctrl-C, quitting Rerun Viewer…");
                             tx.send_ui(UICommand::Quit);
                             egui_ctx.request_repaint();
                         }
@@ -2179,6 +2190,13 @@ fn start_native_viewer_with_wrapper(
                 (command_tx, command_rx),
             );
 
+            if let Some(memory_limit) = memory_limit {
+                re_log::debug!("Parsing --memory-limit (for Viewer)");
+                let memory_limit = re_memory::MemoryLimit::parse(&memory_limit)
+                    .map_err(|err| anyhow::format_err!("Bad --memory-limit: {err}"))?;
+                app.app_options_mut().memory_limit = memory_limit;
+            }
+
             #[allow(clippy::allow_attributes, unused_mut)]
             let ReceiversFromUrlParams {
                 mut log_receivers,
@@ -2191,6 +2209,7 @@ fn start_native_viewer_with_wrapper(
                 follow,
             )?;
 
+            // If we're **not** connecting to an existing server, we spawn a new one and add it to the list of receivers.
             #[cfg(feature = "server")]
             if !connect {
                 let log_receiver = re_grpc_server::spawn_with_recv(
@@ -2198,6 +2217,7 @@ fn start_native_viewer_with_wrapper(
                     server_options,
                     re_grpc_server::shutdown::never(),
                 );
+
                 log_receivers.push(log_receiver);
             }
 
@@ -2212,7 +2232,7 @@ fn start_native_viewer_with_wrapper(
                 app.set_examples_manifest_url(url);
             }
 
-            // Apply the DimOS wrapper if provided, otherwise return stock App
+            // Apply the DimOS wrapper if provided, otherwise return stock App.
             if let Some(wrapper) = app_wrapper {
                 wrapper(app)
             } else {
