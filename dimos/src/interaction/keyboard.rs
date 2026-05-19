@@ -138,6 +138,10 @@ impl KeyboardHandler {
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-5.0, -5.0))
             .order(egui::Order::Foreground)
             .interactable(true)
+            // Sense drags too (default for a non-movable interactable Area is
+            // CLICK-only), otherwise click-with-tiny-mouse-motion leaks through
+            // to the 3D viewport's camera-drag handler.
+            .sense(egui::Sense::click_and_drag())
             .show(ctx, |ui| {
                 let border_color = if self.engaged {
                     egui::Color32::from_rgb(60, 180, 75) // green border when active
