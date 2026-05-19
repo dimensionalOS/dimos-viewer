@@ -59,6 +59,7 @@ impl eframe::App for DimosApp {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let main_thread_token = re_viewer::MainThreadToken::i_promise_i_am_on_the_main_thread();
+    re_log::setup_logging();
     let build_info = re_viewer::build_info();
 
     // Parse args (including --ws-url) via Rerun's clap Args, without consuming them.
