@@ -3045,15 +3045,10 @@ dependencies = [
 name = "dimos-viewer"
 version = "0.32.0-alpha.1"
 dependencies = [
- "bincode",
  "clap",
- "futures-util",
  "mimalloc",
+ "re_dimos",
  "rerun",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
@@ -8735,6 +8730,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "re_dimos"
+version = "0.32.0-alpha.1"
+dependencies = [
+ "egui",
+ "futures-util",
+ "js-sys",
+ "re_log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "re_entity_db"
 version = "0.32.0-alpha.1"
 dependencies = [
@@ -10388,6 +10400,7 @@ dependencies = [
  "re_data_source",
  "re_data_ui",
  "re_dataframe_ui",
+ "re_dimos",
  "re_entity_db",
  "re_error",
  "re_format",

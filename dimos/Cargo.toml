@@ -20,28 +20,15 @@ default = []
 analytics = ["rerun/analytics"]
 
 [dependencies]
+re_dimos.workspace = true
 rerun = { path = "../crates/top/rerun", default-features = false, features = [
   "native_viewer",
   "run",
   "server",
 ] }
 
-bincode.workspace = true
 clap.workspace = true
-futures-util.workspace = true
 mimalloc.workspace = true
-serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
-tokio = { workspace = true, features = [
-  "io-util",
-  "macros",
-  "net",
-  "rt-multi-thread",
-  "signal",
-  "sync",
-  "time",
-] }
-tokio-tungstenite = "0.28.0"
 
 [lints]
 workspace = true

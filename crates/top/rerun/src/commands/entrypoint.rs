@@ -1760,6 +1760,7 @@ fn record_cli_command_analytics(args: &Args) {
         cors_allow_origin: _,
         port: _,
         new: _,
+        ws_url: _,
     } = args;
 
     let (command, subcommand) = match command {
@@ -1832,23 +1833,23 @@ fn record_cli_command_analytics(args: &Args) {
 
 // --- DimOS extension: App wrapper support ---
 
-/// A function that wraps a `re_viewer::App` into a custom `Box<dyn eframe::App>`.
-/// Used by dimos-viewer to inject keyboard teleop and other behaviors.
-pub type AppWrapper = Box<dyn FnOnce(re_viewer::App) -> Result<Box<dyn re_viewer::external::eframe::App>, Box<dyn std::error::Error + Send + Sync>> + Send>;
+#[cfg(feature = "native_viewer")]
+pub type AppWrapper = Box<
+    dyn FnOnce(
+            re_viewer::App,
+        ) -> Result<
+            Box<dyn re_viewer::external::eframe::App>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > + Send,
+>;
 
-/// Optional patches to [`re_viewer::StartupOptions`] injected by the app wrapper.
+#[cfg(feature = "native_viewer")]
 #[derive(Default)]
 pub struct StartupOptionsPatch {
-    /// Callback invoked on viewer events (e.g. SelectionChange for click-to-nav).
     pub on_event: Option<std::rc::Rc<dyn Fn(re_viewer::ViewerEvent)>>,
 }
 
-/// Like [`run`], but accepts an optional `app_wrapper` callback that wraps the
-/// viewer App before it is handed to eframe. When `app_wrapper` is `None`,
-/// behavior is identical to stock Rerun.
-///
-/// This is the dimos-viewer integration point: the wrapper injects keyboard
-/// teleop (DimosApp) while preserving all stock Rerun CLI handling.
+#[cfg(feature = "native_viewer")]
 pub fn run_with_app_wrapper<I, T>(
     main_thread_token: crate::MainThreadToken,
     build_info: re_build_info::BuildInfo,
@@ -1968,7 +1969,7 @@ where
     }
 }
 
-/// Like `run_impl` but passes an `app_wrapper` to the native viewer path.
+#[cfg(feature = "native_viewer")]
 fn run_impl_with_wrapper(
     _main_thread_token: crate::MainThreadToken,
     _build_info: re_build_info::BuildInfo,

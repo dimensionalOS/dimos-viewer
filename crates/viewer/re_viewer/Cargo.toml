@@ -59,6 +59,7 @@ testing = ["dep:egui_kittest", "dep:tokio", "re_ui/testing", "re_analytics/testi
 
 [dependencies]
 # Internal:
+re_dimos.workspace = true
 re_auth.workspace = true
 re_blueprint_tree.workspace = true
 re_build_info.workspace = true

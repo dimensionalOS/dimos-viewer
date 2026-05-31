@@ -1,0 +1,39 @@
+[package]
+name = "re_dimos"
+version = "0.32.0-alpha.1"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "DimOS interaction features: keyboard teleop overlay and WebSocket publisher"
+
+[features]
+default = []
+
+[dependencies]
+egui.workspace = true
+re_log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "time", "io-util", "net", "macros"] }
+tokio-tungstenite = "0.28.0"
+futures-util.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.117"
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true, features = [
+  "WebSocket",
+  "MessageEvent",
+  "ErrorEvent",
+  "CloseEvent",
+  "BinaryType",
+  "Window",
+  "console",
+] }
+js-sys.workspace = true
+
+[lints]
+workspace = true

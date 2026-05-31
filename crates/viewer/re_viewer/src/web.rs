@@ -102,17 +102,27 @@ impl WebHandle {
         };
 
         let connection_registry = self.connection_registry.clone();
+        let ws_url = app_options
+            .ws_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_DIMOS_WS_URL.to_owned());
+        let ws_publisher = re_dimos::WsPublisher::connect(ws_url);
+        let keyboard_ws = ws_publisher.clone();
+
         self.runner
             .start(
                 canvas,
                 web_options,
                 Box::new(move |cc| {
-                    Ok(Box::new(create_app(
+                    let inner = create_app(
                         main_thread_token,
                         cc,
                         connection_registry,
                         app_options,
-                    )?))
+                        Some(ws_publisher),
+                    )?;
+                    let keyboard = re_dimos::KeyboardHandler::new(keyboard_ws);
+                    Ok(Box::new(DimosApp { inner, keyboard }))
                 }),
             )
             .await?;
@@ -124,7 +134,7 @@ impl WebHandle {
 
     #[wasm_bindgen]
     pub fn toggle_panel_overrides(&self, value: Option<bool>) {
-        let Some(mut app) = self.runner.app_mut::<crate::App>() else {
+        let Some(mut app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -139,7 +149,7 @@ impl WebHandle {
 
     #[wasm_bindgen]
     pub fn override_panel_state(&self, panel: &str, state: Option<String>) -> Result<(), JsValue> {
-        let Some(mut app) = self.runner.app_mut::<crate::App>() else {
+        let Some(mut app) = self.runner.app_mut::<DimosApp>() else {
             return Ok(());
         };
 
@@ -200,7 +210,7 @@ impl WebHandle {
     /// It is an error to open a channel twice with the same id.
     #[wasm_bindgen]
     pub fn add_receiver(&self, url: &str, follow: Option<bool>) {
-        let Some(app) = self.runner.app_mut::<crate::App>() else {
+        let Some(app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -225,7 +235,7 @@ impl WebHandle {
 
     #[wasm_bindgen]
     pub fn remove_receiver(&self, url: &str) {
-        let Some(mut app) = self.runner.app_mut::<crate::App>() else {
+        let Some(mut app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
         app.msg_receive_set().remove_by_uri(url);
@@ -242,7 +252,7 @@ impl WebHandle {
     /// It is an error to open a channel twice with the same id.
     #[wasm_bindgen]
     pub fn open_channel(&mut self, id: &str, channel_name: &str) {
-        let Some(mut app) = self.runner.app_mut::<crate::App>() else {
+        let Some(mut app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -264,7 +274,7 @@ impl WebHandle {
     /// No-op if the channel is already closed.
     #[wasm_bindgen]
     pub fn close_channel(&mut self, id: &str) {
-        let Some(app) = self.runner.app_mut::<crate::App>() else {
+        let Some(app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -284,7 +294,7 @@ impl WebHandle {
     pub fn send_rrd_to_channel(&self, id: &str, data: &[u8]) {
         use std::ops::ControlFlow;
         use std::sync::Arc;
-        let Some(app) = self.runner.app_mut::<crate::App>() else {
+        let Some(app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -332,7 +342,7 @@ impl WebHandle {
 
     #[wasm_bindgen]
     pub fn send_table_to_channel(&self, id: &str, data: &[u8]) {
-        let Some(app) = self.runner.app_mut::<crate::App>() else {
+        let Some(app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -384,7 +394,7 @@ impl WebHandle {
 
     #[wasm_bindgen]
     pub fn get_active_recording_id(&self) -> Option<String> {
-        let app = self.runner.app_mut::<crate::App>()?;
+        let app = self.runner.app_mut::<DimosApp>()?;
         let hub = app.store_hub.as_ref()?;
         let recording_id = app.active_recording_id()?;
         let recording = hub.entity_db(recording_id)?;
@@ -395,7 +405,7 @@ impl WebHandle {
     //TODO(#10737): we should refer to logical recordings using store id (recording id is ambibuous)
     #[wasm_bindgen]
     pub fn set_active_recording_id(&self, recording_id: &str) {
-        let Some(mut app) = self.runner.app_mut::<crate::App>() else {
+        let Some(mut app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -421,12 +431,12 @@ impl WebHandle {
     //TODO(#10737): we should refer to logical recordings using store id (recording id is ambibuous)
     #[wasm_bindgen]
     pub fn get_active_timeline(&self, recording_id: &str) -> Option<String> {
-        let mut app = self.runner.app_mut::<crate::App>()?;
+        let mut app = self.runner.app_mut::<DimosApp>()?;
         let crate::App {
             store_hub: Some(hub),
             state,
             ..
-        } = &mut *app
+        } = &mut **app
         else {
             return None;
         };
@@ -442,7 +452,7 @@ impl WebHandle {
     //TODO(#10737): we should refer to logical recordings using store id (recording id is ambibuous)
     #[wasm_bindgen]
     pub fn set_active_timeline(&self, recording_id: &str, timeline_name: &str) {
-        let Some(app) = self.runner.app_mut::<crate::App>() else {
+        let Some(app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -466,7 +476,7 @@ impl WebHandle {
     //TODO(#10737): we should refer to logical recordings using store id (recording id is ambibuous)
     #[wasm_bindgen]
     pub fn get_time_for_timeline(&self, recording_id: &str, timeline_name: &str) -> Option<f64> {
-        let app = self.runner.app_mut::<crate::App>()?;
+        let app = self.runner.app_mut::<DimosApp>()?;
 
         let store_id = store_id_from_recording_id(app.store_hub.as_ref()?, recording_id)?;
         let time_ctrl = app.state.time_control(&store_id)?;
@@ -479,7 +489,7 @@ impl WebHandle {
     //TODO(#10737): we should refer to logical recordings using store id (recording id is ambibuous)
     #[wasm_bindgen]
     pub fn set_time_for_timeline(&self, recording_id: &str, timeline_name: &str, time: f64) {
-        let Some(app) = self.runner.app_mut::<crate::App>() else {
+        let Some(app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
 
@@ -506,13 +516,13 @@ impl WebHandle {
     //TODO(#10737): we should refer to logical recordings using store id (recording id is ambibuous)
     #[wasm_bindgen]
     pub fn get_timeline_time_range(&self, recording_id: &str, timeline_name: &str) -> JsValue {
-        let Some(app) = self.runner.app_mut::<crate::App>() else {
+        let Some(app) = self.runner.app_mut::<DimosApp>() else {
             return JsValue::null();
         };
         let crate::App {
             store_hub: Some(hub),
             ..
-        } = &*app
+        } = &**app
         else {
             return JsValue::null();
         };
@@ -541,12 +551,12 @@ impl WebHandle {
     //TODO(#10737): we should refer to logical recordings using store id (recording id is ambibuous)
     #[wasm_bindgen]
     pub fn get_playing(&self, recording_id: &str) -> Option<bool> {
-        let app = self.runner.app_mut::<crate::App>()?;
+        let app = self.runner.app_mut::<DimosApp>()?;
         let crate::App {
             store_hub: Some(hub),
             state,
             ..
-        } = &*app
+        } = &**app
         else {
             return None;
         };
@@ -563,7 +573,7 @@ impl WebHandle {
     //TODO(#10737): we should refer to logical recordings using store id (recording id is ambibuous)
     #[wasm_bindgen]
     pub fn set_playing(&self, recording_id: &str, value: bool) {
-        let Some(mut app) = self.runner.app_mut::<crate::App>() else {
+        let Some(mut app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
         let crate::App {
@@ -571,7 +581,7 @@ impl WebHandle {
             egui_ctx,
             command_sender,
             ..
-        } = &mut *app;
+        } = &mut **app;
 
         let Some(hub) = store_hub.as_ref() else {
             return;
@@ -595,14 +605,14 @@ impl WebHandle {
 
     #[wasm_bindgen]
     pub fn set_credentials(&self, access_token: &str, email: &str) {
-        let Some(mut app) = self.runner.app_mut::<crate::App>() else {
+        let Some(mut app) = self.runner.app_mut::<DimosApp>() else {
             return;
         };
         let crate::App {
             command_sender,
             egui_ctx,
             ..
-        } = &mut *app;
+        } = &mut **app;
 
         command_sender.send_system(SystemCommand::SetAuthCredentials {
             access_token: access_token.to_owned(),
@@ -679,6 +689,9 @@ pub struct AppOptions {
     panel_state_overrides: Option<PanelStateOverrides>,
     on_viewer_event: Option<Callback>,
     fullscreen: Option<FullscreenOptions>,
+
+    // DimOS-specific
+    ws_url: Option<String>,
 }
 
 // Keep in sync with the `FullscreenOptions` interface in `rerun_js/web-viewer/index.ts`
@@ -715,6 +728,7 @@ fn create_app(
     cc: &eframe::CreationContext<'_>,
     connection_registry: re_redap_client::ConnectionRegistryHandle,
     app_options: AppOptions,
+    click_ws: Option<re_dimos::WsPublisher>,
 ) -> Result<crate::App, re_renderer::RenderContextError> {
     let build_info = re_build_info::build_info!();
 
@@ -739,6 +753,8 @@ fn create_app(
         fallback_token,
         theme,
         login,
+
+        ws_url: _, // consumed earlier by DimosApp::new
     } = app_options;
 
     if let Some(fallback_token) = fallback_token {
@@ -769,16 +785,46 @@ fn create_app(
         video_decoder_hw_acceleration,
         hide_welcome_screen: hide_welcome_screen.unwrap_or(false),
 
-        on_event: on_viewer_event.clone().map(|on_event| {
-            Rc::new(move |event: crate::ViewerEvent| {
-                let Some(event) = serde_json::to_string(&event).ok_or_log_error() else {
-                    return;
-                };
-                on_event
-                    .call1(&JsValue::from_str(&event))
-                    .ok_or_log_js_error();
-            }) as crate::event::ViewerEventCallback
-        }),
+        on_event: {
+            let js_cb = on_viewer_event.clone();
+            let dimos_ws = click_ws;
+            Some(Rc::new(move |event: crate::ViewerEvent| {
+                if let Some(ref on_event) = js_cb {
+                    if let Some(json) = serde_json::to_string(&event).ok_or_log_error() {
+                        on_event
+                            .call1(&JsValue::from_str(&json))
+                            .ok_or_log_js_error();
+                    }
+                }
+                if let Some(ref ws) = dimos_ws {
+                    if let crate::ViewerEventKind::SelectionChange { ref items } = event.kind {
+                        for item in items {
+                            if let crate::SelectionChangeItem::Entity {
+                                entity_path,
+                                position: Some(pos),
+                                ..
+                            } = item
+                            {
+                                let timestamp_ms = web_time::SystemTime::now()
+                                    .duration_since(web_time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis()
+                                    as u64;
+                                if let Err(err) = ws.send_click(
+                                    pos.x as f64,
+                                    pos.y as f64,
+                                    pos.z as f64,
+                                    &entity_path.to_string(),
+                                    timestamp_ms,
+                                ) {
+                                    re_log::warn!("Failed to send click event: {err}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }) as crate::event::ViewerEventCallback)
+        },
 
         fullscreen_options: fullscreen.clone(),
         panel_state_overrides: panel_state_overrides.unwrap_or_default().into(),
@@ -879,6 +925,60 @@ fn table_msg_from_record_batch(
         id: TableId::new(id),
         data,
     })
+}
+
+// ─── DimosApp wrapper: adds keyboard teleop overlay to the viewer ────────────
+
+const DEFAULT_DIMOS_WS_URL: &str = "ws://127.0.0.1:3030/ws";
+
+struct DimosApp {
+    inner: crate::App,
+    keyboard: re_dimos::KeyboardHandler,
+}
+
+impl std::ops::Deref for DimosApp {
+    type Target = crate::App;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for DimosApp {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl eframe::App for DimosApp {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.inner.logic(ctx, frame);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.keyboard.process(ui.ctx());
+        self.keyboard.draw_overlay(ui.ctx());
+        self.inner.ui(ui, frame);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.inner.save(storage);
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        self.inner.clear_color(visuals)
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        self.inner.persist_egui_memory()
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        self.inner.auto_save_interval()
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.inner.raw_input_hook(ctx, raw_input);
+    }
 }
 
 #[cfg(test)]

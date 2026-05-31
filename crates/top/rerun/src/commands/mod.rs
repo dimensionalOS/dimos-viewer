@@ -37,9 +37,10 @@ mod analytics;
 #[cfg(feature = "analytics")]
 pub(crate) use self::analytics::AnalyticsCommands;
 pub use self::download::DownloadCommand;
+pub use self::entrypoint::{Args as RerunArgs, run};
+#[cfg(feature = "native_viewer")]
 pub use self::entrypoint::{
-    run, run_with_app_wrapper, AppWrapper, StartupOptionsPatch, Args as RerunArgs,
-    native_startup_options_from_args,
+    AppWrapper, StartupOptionsPatch, native_startup_options_from_args, run_with_app_wrapper,
 };
 #[cfg(feature = "importers")]
 pub use self::mcap::McapCommands;
