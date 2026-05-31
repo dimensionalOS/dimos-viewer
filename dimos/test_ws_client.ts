@@ -35,6 +35,12 @@ Deno.serve({ port }, (req) => {
           );
         } else if (msg.type === "stop") {
           console.log(`[${ts}] stop`);
+        } else if (msg.type === "key_down") {
+          console.log(`[${ts}] key_down   key="${msg.key}"`);
+        } else if (msg.type === "key_pressed") {
+          console.log(`[${ts}] key_press  key="${msg.key}"`);
+        } else if (msg.type === "key_up") {
+          console.log(`[${ts}] key_up     key="${msg.key}"`);
         } else {
           console.log(`[${ts}] unknown   `, msg);
         }

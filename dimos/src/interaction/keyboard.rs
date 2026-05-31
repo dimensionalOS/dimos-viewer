@@ -58,6 +58,18 @@ impl KeyState {
         self.strafe_r = false;
         self.fast = false;
     }
+
+    fn fields(&self) -> [(&'static str, bool); 7] {
+        [
+            ("w", self.forward),
+            ("s", self.backward),
+            ("a", self.left),
+            ("d", self.right),
+            ("q", self.strafe_l),
+            ("e", self.strafe_r),
+            ("shift", self.fast),
+        ]
+    }
 }
 
 /// Handles keyboard input and publishes Twist via WebSocket.
@@ -65,6 +77,7 @@ impl KeyState {
 pub struct KeyboardHandler {
     ws: WsPublisher,
     state: KeyState,
+    prev_state: KeyState,
     was_active: bool,
     estop_flash: bool,  // true briefly after space pressed
     engaged: bool,      // true when user has clicked the overlay to activate
@@ -76,6 +89,7 @@ impl KeyboardHandler {
         Self {
             ws,
             state: KeyState::new(),
+            prev_state: KeyState::new(),
             was_active: false,
             estop_flash: false,
             engaged: false,
@@ -93,20 +107,25 @@ impl KeyboardHandler {
         // If not engaged, don't capture any keys
         if !self.engaged {
             if self.was_active {
+                self.send_all_key_ups();
                 if let Err(e) = self.publish_stop() {
                     re_log::warn!("Failed to send stop on disengage: {e}");
                 }
                 self.was_active = false;
+                self.prev_state.reset();
             }
             return false;
         }
 
         // Update key state from egui input (engaged flag is the only gate)
         self.update_key_state(ctx);
+        self.send_key_events();
 
         // Check for emergency stop (Space key pressed - one-shot action)
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            self.send_all_key_ups();
             self.state.reset();
+            self.prev_state.reset();
             if let Err(e) = self.publish_stop() {
                 re_log::warn!("Failed to send emergency stop: {e}");
             }
@@ -174,11 +193,12 @@ impl KeyboardHandler {
                 if click_response.clicked() {
                     self.engaged = !self.engaged;
                     if !self.engaged {
-                        // Send stop when disengaging
+                        self.send_all_key_ups();
                         if let Err(err) = self.publish_stop() {
                             re_log::warn!("Failed to send stop on disengage: {err}");
                         }
                         self.state.reset();
+                        self.prev_state.reset();
                         self.was_active = false;
                     }
                 }
@@ -191,10 +211,12 @@ impl KeyboardHandler {
             && ctx.input(|i| i.pointer.primary_clicked())
         {
             self.engaged = false;
+            self.send_all_key_ups();
             if let Err(err) = self.publish_stop() {
                 re_log::warn!("Failed to send stop on outside click: {err}");
             }
             self.state.reset();
+            self.prev_state.reset();
             self.was_active = false;
         }
     }
@@ -282,6 +304,43 @@ impl KeyboardHandler {
         );
     }
 
+    fn send_key_events(&mut self) {
+        let prev = self.prev_state.fields();
+        let curr = self.state.fields();
+        for i in 0..prev.len() {
+            let (key, was) = prev[i];
+            let (_, now) = curr[i];
+            match (was, now) {
+                (false, true) => {
+                    self.send_key_event_quiet(|ws| ws.send_key_down(key));
+                    self.send_key_event_quiet(|ws| ws.send_key_pressed(key));
+                }
+                (true, true) => {
+                    self.send_key_event_quiet(|ws| ws.send_key_pressed(key));
+                }
+                (true, false) => {
+                    self.send_key_event_quiet(|ws| ws.send_key_up(key));
+                }
+                (false, false) => {}
+            }
+        }
+        self.prev_state = self.state.clone();
+    }
+
+    fn send_all_key_ups(&self) {
+        for (key, was) in self.prev_state.fields() {
+            if was {
+                self.send_key_event_quiet(|ws| ws.send_key_up(key));
+            }
+        }
+    }
+
+    fn send_key_event_quiet(&self, f: impl FnOnce(&WsPublisher) -> Result<(), super::ws::SendError>) {
+        if let Err(e) = f(&self.ws) {
+            re_log::trace!("Key event send failed: {e}");
+        }
+    }
+
     /// Read current key state from egui input, update self.state.
     fn update_key_state(&mut self, ctx: &egui::Context) {
         ctx.input(|i| {
@@ -356,6 +415,7 @@ impl std::fmt::Debug for KeyboardHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeyboardHandler")
             .field("state", &self.state)
+            .field("prev_state", &self.prev_state)
             .field("was_active", &self.was_active)
             .finish()
     }
@@ -375,7 +435,8 @@ mod tests {
     fn handler_with(state: KeyState) -> KeyboardHandler {
         KeyboardHandler {
             ws: test_ws(),
-            state,
+            state: state.clone(),
+            prev_state: state,
             was_active: false,
             estop_flash: false,
             engaged: true,

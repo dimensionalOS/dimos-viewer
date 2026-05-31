@@ -57,6 +57,15 @@ pub enum WsEvent {
         angular_z: f64,
     },
     Stop,
+    KeyDown {
+        key: String,
+    },
+    KeyPressed {
+        key: String,
+    },
+    KeyUp {
+        key: String,
+    },
 }
 
 /// Sends `WsEvent`s (serialized to JSON) to a remote WebSocket server.
@@ -133,6 +142,18 @@ impl WsPublisher {
     /// Publish a stop command.
     pub fn send_stop(&self) -> Result<(), SendError> {
         self.broadcast(WsEvent::Stop)
+    }
+
+    pub fn send_key_down(&self, key: &str) -> Result<(), SendError> {
+        self.broadcast(WsEvent::KeyDown { key: key.to_owned() })
+    }
+
+    pub fn send_key_pressed(&self, key: &str) -> Result<(), SendError> {
+        self.broadcast(WsEvent::KeyPressed { key: key.to_owned() })
+    }
+
+    pub fn send_key_up(&self, key: &str) -> Result<(), SendError> {
+        self.broadcast(WsEvent::KeyUp { key: key.to_owned() })
     }
 
     fn broadcast(&self, event: WsEvent) -> Result<(), SendError> {
