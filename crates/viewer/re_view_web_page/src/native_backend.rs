@@ -221,7 +221,8 @@ mod platform {
         if gtk::is_initialized_main_thread() {
             // Keep WebKitGTK responsive without letting its event queue monopolize an egui frame.
             // Further events will be drained on subsequent frames.
-            for _ in 0..16 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(4);
+            while std::time::Instant::now() < deadline {
                 if !gtk::events_pending() {
                     break;
                 }

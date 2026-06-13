@@ -247,6 +247,10 @@ impl ViewClass for WebPageView {
             WebViewLifecycleStatus::Ready => {
                 state.lifecycle.update_bounds(query.view_id, webview_bounds);
                 state.lifecycle.set_visible(true);
+                if !ctx.app_ctx.is_test {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(16));
+                }
                 match state.pending_navigation_command.take() {
                     Some(NavigationCommand::Back) => state.lifecycle.go_back(),
                     Some(NavigationCommand::Forward) => state.lifecycle.go_forward(),
