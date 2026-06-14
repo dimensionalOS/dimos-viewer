@@ -1070,6 +1070,12 @@ fn apply_pending_web_page_view_requests(
                 view.display_name = Some(request.title.clone());
 
                 let view_id = viewport_blueprint.add_view_at_root(view);
+
+                // Adding a view via the DimOS command counts as a user edit: otherwise
+                // auto-layout heuristics re-derive the layout from logged data every frame
+                // and drop the (data-less) Web Page View before it can be shown.
+                viewport_blueprint.mark_user_interaction(ctx);
+
                 panel_ids.insert(request.panel_id.clone(), view_id);
                 view_id
             });

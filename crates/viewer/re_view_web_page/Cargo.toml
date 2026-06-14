@@ -31,7 +31,6 @@ native_webview = [
 [dependencies]
 ahash.workspace = true
 egui.workspace = true
-gtk = { workspace = true, optional = true }
 parking_lot.workspace = true
 re_log_types.workspace = true
 re_sdk_types.workspace = true
@@ -49,6 +48,12 @@ wry = { workspace = true, optional = true, default-features = false, features = 
   "os-webview",
   "x11",
 ] }
+
+# GTK/WebKitGTK is only used on Linux (see the `cfg(target_os = "linux")` platform
+# module in `native_backend.rs`). Gating it here keeps the macOS/Windows builds from
+# pulling in GTK system libraries.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { workspace = true, optional = true }
 
 [dev-dependencies]
 egui_kittest.workspace = true
