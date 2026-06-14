@@ -207,12 +207,30 @@ impl From<WebViewBounds> for wry::Rect {
         let height = bounds.size[1].max(1.0).round() as u32;
 
         // `WebViewBounds` is already in physical pixels (`from_egui_rect` multiplies the
-        // egui rect by `pixels_per_point`), so it must be handed to wry as a *physical*
-        // rect. Passing it as logical double-counts the scale factor on HiDPI/Retina
-        // displays, shifting and oversizing the webview off its tile.
-        Self {
-            position: wry::dpi::PhysicalPosition::new(min_x, min_y).into(),
-            size: wry::dpi::PhysicalSize::new(width, height).into(),
+        // egui rect by `pixels_per_point`).
+        //
+        // On macOS/Windows the webview is a direct native child surface positioned in
+        // physical pixels, so it must be handed to wry as a *physical* rect — passing it
+        // as logical double-counts the scale factor on Retina/HiDPI displays, shifting and
+        // oversizing the webview off its tile.
+        //
+        // On Linux the X11 child-window path is positioned in GTK logical coordinates and
+        // only the scale-factor-1.0 case is supported (Wayland/HiDPI needs the GTK
+        // container path — see the `platform` module). Keep the original logical behavior
+        // there so the supported X11 path is unchanged.
+        #[cfg(target_os = "linux")]
+        {
+            Self {
+                position: wry::dpi::LogicalPosition::new(min_x, min_y).into(),
+                size: wry::dpi::LogicalSize::new(width, height).into(),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self {
+                position: wry::dpi::PhysicalPosition::new(min_x, min_y).into(),
+                size: wry::dpi::PhysicalSize::new(width, height).into(),
+            }
         }
     }
 }

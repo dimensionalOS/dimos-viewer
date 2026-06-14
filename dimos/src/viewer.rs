@@ -64,6 +64,9 @@ impl eframe::App for DimosApp {
     /// re_viewer::App drains log_receivers / ingests messages here, so we MUST
     /// forward — otherwise the viewer's data pipeline stalls.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Idempotent; installs the macOS Edit menu on the first frame so that the
+        // native Web Page View can receive cmd+C / cmd+V via the responder chain.
+        dimos_viewer::macos_menu::install_edit_menu();
         self.inner.logic(ctx, frame);
     }
 
