@@ -2,7 +2,7 @@
 
 DimOS needs a pragmatic way to request a Web Page View panel from its existing websocket control path while preserving Rerun's canonical blueprint/Python API as the source of truth for viewer layout. This lets reviewers evaluate the DimOS convenience command independently from the core native Web Page View implementation.
 
-## What Changes
+## What changes
 
 - Add a DimOS-only websocket command, `open_web_page_view`, that requests a Web Page View panel by caller-owned `panel_id`.
 - Translate the websocket command into Web Page View blueprint state instead of directly mutating native webview internals.
@@ -12,11 +12,11 @@ DimOS needs a pragmatic way to request a Web Page View panel from its existing w
 
 ## Capabilities
 
-### New Capabilities
+### New capabilities
 
 - `dimos-web-page-command`: DimOS websocket command for opening/updating/focusing native Web Page View panels.
 
-### Modified Capabilities
+### Modified capabilities
 
 - `native-web-page-view`: Clarifies that Web Page View remains blueprint-owned and can be requested by a DimOS websocket convenience wrapper without changing the canonical Rerun blueprint API.
 

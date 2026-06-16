@@ -11,7 +11,7 @@ import time
 import rerun as rr
 import rerun.blueprint as rrb
 
-rr.init("web_page_youtube_smoke")
+rr.init("rerun_example_web_page_youtube_smoke")
 rr.connect_grpc("rerun+http://127.0.0.1:9876/proxy")
 rr.send_blueprint(
     rrb.Blueprint(

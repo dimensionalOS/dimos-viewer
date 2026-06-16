@@ -1,4 +1,4 @@
-# PR Notes: DimOS Web Page View command
+# PR notes: DimOS web page view command
 
 ## Canonical API
 

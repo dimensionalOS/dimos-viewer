@@ -1,6 +1,6 @@
 ## Context
 
-The native Web Page View implementation already exposes the canonical Rerun path for creating a web panel: users send blueprint state through the generated Rerun SDK, e.g. `rr.send_blueprint(rrb.WebPageView(config=rrb.WebPageViewConfig(url=...)))`. That path is official, typed, and transported through Rerun's existing log/gRPC channel.
+The native Web Page View implementation already exposes the canonical Rerun path for creating a web panel: users send blueprint state through the generated Rerun SDK, e.g. `rr.send_blueprint(rrb.WebPageView(config=rrb.WebPageViewConfig(url=…)))`. That path is official, typed, and transported through Rerun's existing log/gRPC channel.
 
 DimOS also has an existing websocket control path in `dimos/src/interaction/ws.rs`. Today it is outbound from the viewer to the DimOS server for click, twist, and stop events; incoming frames are consumed only to keep the connection healthy. The DimOS viewer wrapper in `dimos/src/viewer.rs` wraps `re_viewer::App` for keyboard and selection behavior.
 
@@ -49,7 +49,7 @@ This change adds a small DimOS-only inbound command lane for requesting Web Page
    - The command requests a logical panel, not a full remote layout edit.
    - If placement is needed later, it should be designed as a separate layout-control capability.
 
-## Risks / Trade-offs
+## Risks / trade-offs
 
 - **Risk: Applying blueprint changes from `DimosApp` may require a core viewer API.** → First inspect for an existing clean path. If unavailable, add the smallest focused viewer method/command needed rather than poking internal viewport state.
 - **Risk: Two apparent APIs can confuse reviewers.** → PR text must explicitly label Python/blueprint as canonical and DimOS websocket as experimental/removable.

@@ -28,7 +28,7 @@ The Web Page View introduces a native-only view that displays a configured `http
 
 ## Decisions
 
-### Native-only Web Page View
+### Native-only web page view
 
 The Web Page View is available only in native viewer builds. The web viewer should render a clear unsupported status instead of attempting iframe support.
 
@@ -82,7 +82,7 @@ Web Page Views share the default embedded browser session/profile in the initial
 **Alternatives considered:**
 - Isolate each view by default. Rejected because common dashboard use cases would require repeated logins and duplicate session setup.
 
-## Risks / Trade-offs
+## Risks / trade-offs
 
 - Native webview surfaces may not clip, stack, or resize exactly like egui widgets → Keep the webview integration behind a narrow module boundary, update bounds from the egui view rectangle, and test split panels/tabs/resizing.
 - Linux support depends on WebKitGTK/display-server details → Treat support as wry-supported native platforms, document dependencies, and render backend errors clearly.

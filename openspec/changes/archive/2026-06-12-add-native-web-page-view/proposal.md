@@ -2,7 +2,7 @@
 
 Rerun users can compose rich native viewer layouts for logged data, but cannot place a live webpage alongside 3D, image, and other views. A native inline Web Page View enables dashboards, local robot control panels, documentation, and other http(s) pages to appear inside the Rerun viewer layout instead of requiring a separate browser window.
 
-## What Changes
+## What changes
 
 - Add a native-only **Web Page View** that displays a configured webpage inline in the viewer layout.
 - Store the view's URL and lightweight browser chrome preference as blueprint/view configuration, not logged timeline data.
@@ -16,10 +16,10 @@ Rerun users can compose rich native viewer layouts for logged data, but cannot p
 
 ## Capabilities
 
-### New Capabilities
+### New capabilities
 - `native-web-page-view`: Defines native Web Page View behavior, configuration, platform support, URL policy, lifecycle, navigation, session handling, and error reporting.
 
-### Modified Capabilities
+### Modified capabilities
 
 None.
 

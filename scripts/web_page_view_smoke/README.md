@@ -1,4 +1,4 @@
-# Web Page View smoke scripts
+# Web page view smoke scripts
 
 These scripts manually smoke-test the experimental native Web Page View.
 

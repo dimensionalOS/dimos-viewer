@@ -25,7 +25,7 @@
 - [x] 4.3 Verify v1 ignores or rejects layout-placement fields rather than treating them as viewport-tree commands.
 - [x] 4.4 Keep implementation localized to `dimos/`; pause for design review if core viewer APIs must be changed.
 
-## 5. PR formalization
+## 5. Pr formalization
 
 - [x] 5.1 Update PR notes or documentation text with the canonical Python/blueprint API example.
 - [x] 5.2 Explicitly label the DimOS websocket command as experimental, DimOS-only, and removable.
