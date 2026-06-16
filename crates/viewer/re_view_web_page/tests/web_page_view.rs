@@ -331,7 +331,7 @@ fn valid_configured_url_creates_one_backend_webview_instance() {
 }
 
 #[test]
-fn changed_configured_url_replaces_backend_webview_without_destroying_replacement() {
+fn changed_configured_url_navigates_existing_backend_webview() {
     let fake_backend = FakeWebViewBackend::default();
     let _backend_guard = fake_backend.install();
 
@@ -365,16 +365,16 @@ fn changed_configured_url_replaces_backend_webview_without_destroying_replacemen
     }
 
     let created_instances = fake_backend.created_instances();
-    assert_eq!(created_instances.len(), 2);
+    assert_eq!(created_instances.len(), 1);
     assert_eq!(created_instances[0].view_id, view_id);
     assert_eq!(created_instances[0].url, "https://example.com/a");
-    assert_eq!(created_instances[1].view_id, view_id);
-    assert_eq!(created_instances[1].url, "https://example.com/b");
 
-    let destroyed_instances = fake_backend.destroyed_instances();
-    assert_eq!(destroyed_instances.len(), 1);
-    assert_eq!(destroyed_instances[0].view_id, view_id);
-    assert_eq!(destroyed_instances[0].url, "https://example.com/a");
+    assert_eq!(fake_backend.destroyed_instance_count(), 0);
+
+    let navigation_requests = fake_backend.navigation_requests();
+    assert_eq!(navigation_requests.len(), 1);
+    assert_eq!(navigation_requests[0].view_id, view_id);
+    assert_eq!(navigation_requests[0].url, "https://example.com/b");
     assert_eq!(
         fake_backend.current_url(view_id).as_deref(),
         Some("https://example.com/b")
