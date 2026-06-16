@@ -250,13 +250,13 @@ async fn run_client(
 
     loop {
         if debug {
-            eprintln!("[DIMOS_DEBUG] WsPublisher: connecting to {url}");
+            re_log::debug!("[DIMOS_DEBUG] WsPublisher: connecting to {url}");
         }
 
         match connect_async(&url).await {
             Ok((ws_stream, _)) => {
                 if debug {
-                    eprintln!("[DIMOS_DEBUG] WsPublisher: connected to {url}");
+                    re_log::debug!("[DIMOS_DEBUG] WsPublisher: connected to {url}");
                 }
 
                 let (mut writer, mut reader) = ws_stream.split();
@@ -274,14 +274,14 @@ async fn run_client(
                                     if let Err(err) = command_tx_read.try_send(command)
                                         && debug_read
                                     {
-                                        eprintln!(
+                                        re_log::warn!(
                                             "[DIMOS_DEBUG] WsPublisher: inbound command dropped: {err}"
                                         );
                                     }
                                 }
                                 Err(err) => {
                                     if debug_read {
-                                        eprintln!(
+                                        re_log::debug!(
                                             "[DIMOS_DEBUG] WsPublisher: ignoring inbound message: {err}"
                                         );
                                     }
@@ -289,13 +289,15 @@ async fn run_client(
                             },
                             Ok(Message::Close(_)) => {
                                 if debug_read {
-                                    eprintln!("[DIMOS_DEBUG] WsPublisher: server sent close frame");
+                                    re_log::debug!(
+                                        "[DIMOS_DEBUG] WsPublisher: server sent close frame"
+                                    );
                                 }
                                 break;
                             }
                             Err(err) => {
                                 if debug_read {
-                                    eprintln!("[DIMOS_DEBUG] WsPublisher: read error: {err}");
+                                    re_log::warn!("[DIMOS_DEBUG] WsPublisher: read error: {err}");
                                 }
                                 break;
                             }
@@ -312,7 +314,7 @@ async fn run_client(
                                 Some(text) => {
                                     if let Err(err) = writer.send(Message::text(text)).await {
                                         if debug {
-                                            eprintln!("[DIMOS_DEBUG] WsPublisher: send error: {err} — reconnecting");
+                                            re_log::warn!("[DIMOS_DEBUG] WsPublisher: send error: {err} — reconnecting");
                                         }
                                         break false;
                                     }
@@ -323,7 +325,7 @@ async fn run_client(
                         _ = &mut read_handle => {
                             // Reader exited → server closed the connection.
                             if debug {
-                                eprintln!("[DIMOS_DEBUG] WsPublisher: server closed connection — reconnecting");
+                                re_log::debug!("[DIMOS_DEBUG] WsPublisher: server closed connection — reconnecting");
                             }
                             break false;
                         }
@@ -332,14 +334,14 @@ async fn run_client(
 
                 if disconnected {
                     if debug {
-                        eprintln!("[DIMOS_DEBUG] WsPublisher: channel closed, shutting down");
+                        re_log::debug!("[DIMOS_DEBUG] WsPublisher: channel closed, shutting down");
                     }
                     break;
                 }
             }
             Err(err) => {
                 if debug {
-                    eprintln!(
+                    re_log::warn!(
                         "[DIMOS_DEBUG] WsPublisher: connection failed: {err} — retrying in 1s"
                     );
                 }

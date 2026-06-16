@@ -5,7 +5,6 @@ pub(crate) struct WebViewInstance {
     pub(crate) url: String,
     #[cfg(debug_assertions)]
     fake_backend: Option<crate::testing::FakeWebViewBackend>,
-    #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
     has_native_webview: bool,
 }
 
@@ -46,12 +45,10 @@ impl WebViewInstance {
             view_id,
             url,
             fake_backend: Some(fake_backend),
-            #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
             has_native_webview: false,
         }
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
     pub(crate) fn new_native(view_id: ViewId, url: String) -> Self {
         Self {
             view_id,
@@ -68,18 +65,12 @@ impl WebViewInstance {
             fake_backend.record_bounds_update(view_id, bounds);
         }
 
-        #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
         if self.has_native_webview {
             crate::native_backend::set_bounds(self.view_id, bounds);
         }
     }
 
     pub(crate) fn set_visible(&self, visible: bool) {
-        #[cfg(not(all(not(target_arch = "wasm32"), feature = "native_webview")))]
-        let _ = self;
-        let _ = visible;
-
-        #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
         if self.has_native_webview {
             crate::native_backend::set_visible(self.view_id, visible);
         }
@@ -91,7 +82,6 @@ impl WebViewInstance {
             fake_backend.record_navigation_command(self.view_id, FakeNavigationCommand::Back);
         }
 
-        #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
         if self.has_native_webview {
             crate::native_backend::go_back(self.view_id);
         }
@@ -103,7 +93,6 @@ impl WebViewInstance {
             fake_backend.record_navigation_command(self.view_id, FakeNavigationCommand::Forward);
         }
 
-        #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
         if self.has_native_webview {
             crate::native_backend::go_forward(self.view_id);
         }
@@ -115,7 +104,6 @@ impl WebViewInstance {
             fake_backend.record_navigation_command(self.view_id, FakeNavigationCommand::Reload);
         }
 
-        #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
         if self.has_native_webview {
             crate::native_backend::reload(self.view_id);
         }
@@ -130,7 +118,6 @@ impl WebViewInstance {
             );
         }
 
-        #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
         if self.has_native_webview {
             crate::native_backend::navigate_to(self.view_id, url);
         }
@@ -147,7 +134,6 @@ impl Drop for WebViewInstance {
             fake_backend.record_destroyed_instance(self.view_id, &self.url);
         }
 
-        #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
         if self.has_native_webview {
             crate::native_backend::destroy(self.view_id);
         }
@@ -210,7 +196,6 @@ pub(crate) fn create_webview(
             .map(Some);
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
     if crate::native_backend::has_native_parent_window() {
         let native_webview = crate::native_backend::NativeWebViewBackend
             .create_child(url, bounds)

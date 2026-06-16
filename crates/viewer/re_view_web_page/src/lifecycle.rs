@@ -21,6 +21,8 @@ impl WebViewLifecycle {
             .as_ref()
             .is_none_or(|webview| webview.url != url)
         {
+            self.webview = None;
+
             match create_webview(ctx, view_id, url, bounds) {
                 Ok(Some(webview)) => {
                     self.webview = Some(webview);

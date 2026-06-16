@@ -320,7 +320,7 @@ impl KeyboardHandler {
             .send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z)?;
 
         if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
-            eprintln!(
+            re_log::debug!(
                 "[DIMOS_DEBUG] Published twist: lin=({lin_x:.2},{lin_y:.2},{lin_z:.2}) ang=({ang_x:.2},{ang_y:.2},{ang_z:.2})"
             );
         }
@@ -331,7 +331,7 @@ impl KeyboardHandler {
     fn publish_stop(&self) -> Result<(), super::ws::SendError> {
         self.ws.send_stop()?;
         if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
-            eprintln!("[DIMOS_DEBUG] Published stop command");
+            re_log::debug!("[DIMOS_DEBUG] Published stop command");
         }
         Ok(())
     }

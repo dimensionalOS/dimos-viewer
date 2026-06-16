@@ -3167,6 +3167,7 @@ dependencies = [
  "futures-util",
  "mimalloc",
  "parking_lot",
+ "re_log",
  "rerun",
  "serde",
  "serde_json",

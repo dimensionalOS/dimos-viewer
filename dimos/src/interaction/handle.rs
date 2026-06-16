@@ -35,7 +35,7 @@ impl InteractionHandle {
         };
 
         if let Err(err) = self.tx.send(event) {
-            eprintln!("Failed to send click event: {err}");
+            re_log::warn!("Failed to send click event: {err}");
         }
     }
 }

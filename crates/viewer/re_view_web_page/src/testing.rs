@@ -140,6 +140,10 @@ impl FakeWebViewBackend {
             .insert(view_id, url.to_owned());
     }
 
+    pub fn current_url(&self, view_id: ViewId) -> Option<String> {
+        self.state.lock().current_urls.get(&view_id).cloned()
+    }
+
     pub fn navigation_requests(&self) -> Vec<FakeNavigationRequest> {
         self.state
             .lock()
@@ -165,13 +169,12 @@ impl FakeWebViewBackend {
     }
 
     pub(crate) fn record_destroyed_instance(&self, view_id: ViewId, url: &str) {
-        self.state
-            .lock()
-            .destroyed_instances
-            .push(FakeDestroyedWebView {
-                view_id,
-                url: url.to_owned(),
-            });
+        let mut state = self.state.lock();
+        state.current_urls.remove(&view_id);
+        state.destroyed_instances.push(FakeDestroyedWebView {
+            view_id,
+            url: url.to_owned(),
+        });
     }
 
     pub(crate) fn record_navigation_command(
@@ -220,6 +223,7 @@ impl WebViewBackend for FakeWebViewBackend {
             url: url.to_owned(),
             session: session.as_str().to_owned(),
         });
+        state.current_urls.insert(view_id, url.to_owned());
 
         Ok(WebViewInstance::new_fake(
             view_id,
