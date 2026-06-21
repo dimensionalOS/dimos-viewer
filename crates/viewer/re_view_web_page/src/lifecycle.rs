@@ -16,24 +16,19 @@ impl WebViewLifecycle {
         url: &str,
         bounds: WebViewBounds,
     ) -> WebViewLifecycleStatus {
-        if self
-            .webview
-            .as_ref()
-            .is_none_or(|webview| webview.url != url)
-        {
+        if let Some(webview) = &mut self.webview {
+            if webview.url != url {
+                webview.navigate_to(url);
+                webview.url = url.to_owned();
+            }
+        } else {
             match create_webview(ctx, view_id, url, bounds) {
                 Ok(Some(webview)) => {
                     self.webview = Some(webview);
                     self.last_bounds = None;
                 }
-                Ok(None) => {
-                    self.webview = None;
-                    return WebViewLifecycleStatus::Unavailable;
-                }
-                Err(err) => {
-                    self.webview = None;
-                    return WebViewLifecycleStatus::CreationFailed(err.to_string());
-                }
+                Ok(None) => return WebViewLifecycleStatus::Unavailable,
+                Err(err) => return WebViewLifecycleStatus::CreationFailed(err.to_string()),
             }
         }
 

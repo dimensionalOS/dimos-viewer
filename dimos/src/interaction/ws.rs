@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 pub enum SendError {
     /// The send queue is full; the event was dropped.
     QueueFull,
+
     /// Failed to serialize the event to JSON.
     Serialize(String),
 }
@@ -67,10 +68,13 @@ pub enum WsCommand {
     OpenWebPageView {
         /// Caller-owned stable identifier used to update the same panel later.
         panel_id: String,
+
         /// Human-readable panel title.
         title: String,
+
         /// Configured page URL.
         url: String,
+
         /// Whether browser-like controls should be visible.
         show_navigation_controls: bool,
     },
@@ -81,6 +85,7 @@ pub enum WsCommand {
 pub enum WsCommandValidationError {
     /// URL text could not be parsed as an absolute URL.
     InvalidUrl,
+
     /// URL uses a scheme that Web Page View does not allow.
     UnsupportedUrlScheme(String),
 }
@@ -218,7 +223,7 @@ impl WsPublisher {
 
     fn broadcast(&self, event: &WsEvent) -> Result<(), SendError> {
         let json =
-            serde_json::to_string(&event).map_err(|e| SendError::Serialize(e.to_string()))?;
+            serde_json::to_string(&event).map_err(|err| SendError::Serialize(err.to_string()))?;
         // Non-blocking: error if the channel is full rather than block the UI thread.
         self.tx.try_send(json).map_err(|err| {
             let _err = err;
@@ -245,13 +250,13 @@ async fn run_client(
 
     loop {
         if debug {
-            eprintln!("[DIMOS_DEBUG] WsPublisher: connecting to {url}");
+            re_log::debug!("[DIMOS_DEBUG] WsPublisher: connecting to {url}");
         }
 
         match connect_async(&url).await {
             Ok((ws_stream, _)) => {
                 if debug {
-                    eprintln!("[DIMOS_DEBUG] WsPublisher: connected to {url}");
+                    re_log::debug!("[DIMOS_DEBUG] WsPublisher: connected to {url}");
                 }
 
                 let (mut writer, mut reader) = ws_stream.split();
@@ -269,14 +274,14 @@ async fn run_client(
                                     if let Err(err) = command_tx_read.try_send(command)
                                         && debug_read
                                     {
-                                        eprintln!(
+                                        re_log::warn!(
                                             "[DIMOS_DEBUG] WsPublisher: inbound command dropped: {err}"
                                         );
                                     }
                                 }
                                 Err(err) => {
                                     if debug_read {
-                                        eprintln!(
+                                        re_log::debug!(
                                             "[DIMOS_DEBUG] WsPublisher: ignoring inbound message: {err}"
                                         );
                                     }
@@ -284,13 +289,15 @@ async fn run_client(
                             },
                             Ok(Message::Close(_)) => {
                                 if debug_read {
-                                    eprintln!("[DIMOS_DEBUG] WsPublisher: server sent close frame");
+                                    re_log::debug!(
+                                        "[DIMOS_DEBUG] WsPublisher: server sent close frame"
+                                    );
                                 }
                                 break;
                             }
                             Err(err) => {
                                 if debug_read {
-                                    eprintln!("[DIMOS_DEBUG] WsPublisher: read error: {err}");
+                                    re_log::warn!("[DIMOS_DEBUG] WsPublisher: read error: {err}");
                                 }
                                 break;
                             }
@@ -307,7 +314,7 @@ async fn run_client(
                                 Some(text) => {
                                     if let Err(err) = writer.send(Message::text(text)).await {
                                         if debug {
-                                            eprintln!("[DIMOS_DEBUG] WsPublisher: send error: {err} — reconnecting");
+                                            re_log::warn!("[DIMOS_DEBUG] WsPublisher: send error: {err} — reconnecting");
                                         }
                                         break false;
                                     }
@@ -318,7 +325,7 @@ async fn run_client(
                         _ = &mut read_handle => {
                             // Reader exited → server closed the connection.
                             if debug {
-                                eprintln!("[DIMOS_DEBUG] WsPublisher: server closed connection — reconnecting");
+                                re_log::debug!("[DIMOS_DEBUG] WsPublisher: server closed connection — reconnecting");
                             }
                             break false;
                         }
@@ -327,14 +334,14 @@ async fn run_client(
 
                 if disconnected {
                     if debug {
-                        eprintln!("[DIMOS_DEBUG] WsPublisher: channel closed, shutting down");
+                        re_log::debug!("[DIMOS_DEBUG] WsPublisher: channel closed, shutting down");
                     }
                     break;
                 }
             }
             Err(err) => {
                 if debug {
-                    eprintln!(
+                    re_log::warn!(
                         "[DIMOS_DEBUG] WsPublisher: connection failed: {err} — retrying in 1s"
                     );
                 }

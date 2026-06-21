@@ -31,6 +31,7 @@ clap.workspace = true
 futures-util.workspace = true
 mimalloc.workspace = true
 parking_lot.workspace = true
+re_log = { workspace = true, features = ["setup"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = [

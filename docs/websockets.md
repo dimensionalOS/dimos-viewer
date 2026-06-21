@@ -1,4 +1,4 @@
-# dimos-viewer WebSocket Event Stream
+# Dimos-viewer WebSocket event stream
 
 When `dimos-viewer` is started with `--connect`, LCM multicast is not available
 (LCM uses UDP multicast which is limited to the local machine or subnet). Instead,

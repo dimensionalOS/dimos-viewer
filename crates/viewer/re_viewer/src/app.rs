@@ -163,10 +163,13 @@ pub struct App {
 pub struct WebPageViewRequest {
     /// Caller-owned stable identifier used to update the same panel later.
     pub panel_id: String,
+
     /// Human-readable panel title.
     pub title: String,
+
     /// Configured page URL.
     pub url: String,
+
     /// Whether browser-like controls should be visible.
     pub show_navigation_controls: bool,
 }

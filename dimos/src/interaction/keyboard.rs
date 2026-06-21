@@ -93,8 +93,8 @@ impl KeyboardHandler {
         // If not engaged, don't capture any keys
         if !self.engaged {
             if self.was_active {
-                if let Err(e) = self.publish_stop() {
-                    re_log::warn!("Failed to send stop on disengage: {e}");
+                if let Err(err) = self.publish_stop() {
+                    re_log::warn!("Failed to send stop on disengage: {err}");
                 }
                 self.was_active = false;
             }
@@ -107,8 +107,8 @@ impl KeyboardHandler {
         // Check for emergency stop (Space key pressed - one-shot action)
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.state.reset();
-            if let Err(e) = self.publish_stop() {
-                re_log::warn!("Failed to send emergency stop: {e}");
+            if let Err(err) = self.publish_stop() {
+                re_log::warn!("Failed to send emergency stop: {err}");
             }
             self.was_active = false;
             self.estop_flash = true;
@@ -117,13 +117,13 @@ impl KeyboardHandler {
 
         // Publish twist command if keys are active, or stop if just released
         if self.state.any_active() {
-            if let Err(e) = self.publish_twist() {
-                re_log::warn!("Failed to publish twist command: {e}");
+            if let Err(err) = self.publish_twist() {
+                re_log::warn!("Failed to publish twist command: {err}");
             }
             self.was_active = true;
         } else if self.was_active {
-            if let Err(e) = self.publish_stop() {
-                re_log::warn!("Failed to send stop on key release: {e}");
+            if let Err(err) = self.publish_stop() {
+                re_log::warn!("Failed to send stop on key release: {err}");
             }
             self.was_active = false;
         }
@@ -314,25 +314,24 @@ impl KeyboardHandler {
     }
 
     /// Convert current KeyState to Twist and publish via WebSocket.
-    fn publish_twist(&mut self) -> Result<(), super::ws::SendError> {
+    fn publish_twist(&self) -> Result<(), super::ws::SendError> {
         let (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z) = self.compute_twist();
         self.ws
             .send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z)?;
 
         if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
-            eprintln!(
-                "[DIMOS_DEBUG] Published twist: lin=({:.2},{:.2},{:.2}) ang=({:.2},{:.2},{:.2})",
-                lin_x, lin_y, lin_z, ang_x, ang_y, ang_z
+            re_log::debug!(
+                "[DIMOS_DEBUG] Published twist: lin=({lin_x:.2},{lin_y:.2},{lin_z:.2}) ang=({ang_x:.2},{ang_y:.2},{ang_z:.2})"
             );
         }
         Ok(())
     }
 
     /// Publish all-zero twist (stop command) via WebSocket.
-    fn publish_stop(&mut self) -> Result<(), super::ws::SendError> {
+    fn publish_stop(&self) -> Result<(), super::ws::SendError> {
         self.ws.send_stop()?;
         if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
-            eprintln!("[DIMOS_DEBUG] Published stop command");
+            re_log::debug!("[DIMOS_DEBUG] Published stop command");
         }
         Ok(())
     }

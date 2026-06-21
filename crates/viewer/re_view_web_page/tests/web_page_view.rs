@@ -331,6 +331,57 @@ fn valid_configured_url_creates_one_backend_webview_instance() {
 }
 
 #[test]
+fn changed_configured_url_navigates_existing_backend_webview() {
+    let fake_backend = FakeWebViewBackend::default();
+    let _backend_guard = fake_backend.install();
+
+    let mut test_context = TestContext::new_with_view_class::<WebPageView>();
+    let view_id = setup_configured_web_page_view(&mut test_context, "https://example.com/a", true);
+
+    {
+        let mut harness = test_context
+            .setup_kittest_for_rendering_ui([500.0, 250.0])
+            .build_ui(|ui| {
+                test_context.run_with_single_view(ui, view_id);
+            });
+        harness.run();
+    }
+
+    assert_eq!(fake_backend.created_urls(), ["https://example.com/a"]);
+    assert_eq!(
+        fake_backend.current_url(view_id).as_deref(),
+        Some("https://example.com/a")
+    );
+
+    update_configured_web_page_view(&mut test_context, view_id, "https://example.com/b", true);
+
+    {
+        let mut harness = test_context
+            .setup_kittest_for_rendering_ui([500.0, 250.0])
+            .build_ui(|ui| {
+                test_context.run_with_single_view(ui, view_id);
+            });
+        harness.run();
+    }
+
+    let created_instances = fake_backend.created_instances();
+    assert_eq!(created_instances.len(), 1);
+    assert_eq!(created_instances[0].view_id, view_id);
+    assert_eq!(created_instances[0].url, "https://example.com/a");
+
+    assert_eq!(fake_backend.destroyed_instance_count(), 0);
+
+    let navigation_requests = fake_backend.navigation_requests();
+    assert_eq!(navigation_requests.len(), 1);
+    assert_eq!(navigation_requests[0].view_id, view_id);
+    assert_eq!(navigation_requests[0].url, "https://example.com/b");
+    assert_eq!(
+        fake_backend.current_url(view_id).as_deref(),
+        Some("https://example.com/b")
+    );
+}
+
+#[test]
 fn two_web_page_views_create_independent_backend_webview_instances() {
     let fake_backend = FakeWebViewBackend::default();
     let _backend_guard = fake_backend.install();
@@ -508,6 +559,26 @@ fn setup_web_page_view_with_default_navigation_controls(
 
         blueprint.add_view_at_root(view)
     })
+}
+
+fn update_configured_web_page_view(
+    test_context: &mut TestContext,
+    view_id: re_viewer_context::ViewId,
+    url: &str,
+    show_navigation_controls: bool,
+) {
+    test_context.setup_viewport_blueprint(|ctx, _blueprint| {
+        let config = ViewProperty::from_archetype::<WebPageViewConfig>(
+            ctx.blueprint_db(),
+            ctx.blueprint_query,
+            view_id,
+        );
+
+        ctx.save_blueprint_archetype(
+            config.blueprint_store_path,
+            &WebPageViewConfig::new(url).with_show_navigation_controls(show_navigation_controls),
+        );
+    });
 }
 
 fn add_configured_web_page_view(

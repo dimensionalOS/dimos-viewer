@@ -20,13 +20,7 @@ all-features = true
 
 [features]
 default = []
-native_webview = [
-  "dep:eframe",
-  "dep:gtk",
-  "dep:raw-window-handle",
-  "dep:scoped-tls",
-  "dep:wry",
-]
+native_webview = ["dep:eframe", "dep:gtk", "dep:raw-window-handle", "dep:scoped-tls", "dep:wry"]
 
 [dependencies]
 ahash.workspace = true
