@@ -65,4 +65,13 @@
     "[yaml]": {
         "editor.defaultFormatter": "esbenp.prettier-vscode"
     },
+    "workbench.colorCustomizations": {
+        "sash.hoverBorder": "#fa1b49",
+        "statusBar.background": "#dd0531",
+        "statusBar.foreground": "#e7e7e7",
+        "statusBarItem.hoverBackground": "#fa1b49",
+        "statusBarItem.remoteBackground": "#dd0531",
+        "statusBarItem.remoteForeground": "#e7e7e7"
+    },
+    "peacock.color": "#dd0531",
 }
