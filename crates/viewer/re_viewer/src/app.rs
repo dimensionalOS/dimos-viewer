@@ -158,6 +158,22 @@ pub struct App {
     async_runtime: AsyncRuntimeHandle,
 }
 
+/// Request to open or update a Web Page View in the active viewport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebPageViewRequest {
+    /// Caller-owned stable identifier used to update the same panel later.
+    pub panel_id: String,
+
+    /// Human-readable panel title.
+    pub title: String,
+
+    /// Configured page URL.
+    pub url: String,
+
+    /// Whether browser-like controls should be visible.
+    pub show_navigation_controls: bool,
+}
+
 impl App {
     pub fn new(
         main_thread_token: MainThreadToken,
@@ -486,6 +502,15 @@ impl App {
 
     pub fn connection_registry(&self) -> &ConnectionRegistryHandle {
         &self.connection_registry
+    }
+
+    /// Queue a Web Page View panel request for the active viewport.
+    ///
+    /// This is intended for thin custom viewer wrappers such as `DimOS`. The request is translated
+    /// into normal blueprint state on the next viewer frame.
+    pub fn open_or_update_web_page_view(&mut self, request: WebPageViewRequest) {
+        self.state.queue_web_page_view_request(request);
+        self.egui_ctx.request_repaint();
     }
 
     pub fn set_examples_manifest_url(&mut self, url: String) {
@@ -2527,6 +2552,33 @@ impl App {
                     let empty_store_context = ActiveStoreContext::empty();
                     let active_store_context = store_context.unwrap_or(&empty_store_context);
 
+                    #[cfg(all(not(target_arch = "wasm32"), feature = "native_webview"))]
+                    re_view_web_page::native_backend::with_native_parent_window(frame, || {
+                        self.state.show(
+                            &self.app_env,
+                            &self.startup_options,
+                            app_blueprint,
+                            ui,
+                            render_ctx,
+                            active_store_context,
+                            storage_context,
+                            &self.reflection,
+                            &self.component_ui_registry,
+                            &self.component_fallback_registry,
+                            &self.view_class_registry,
+                            &self.rx_log,
+                            &self.command_sender,
+                            &WelcomeScreenState {
+                                hide_examples: self.startup_options.hide_welcome_screen,
+                                opacity: self.welcome_screen_opacity(ui),
+                            },
+                            self.event_dispatcher.as_ref(),
+                            &self.connection_registry,
+                            &self.async_runtime,
+                        );
+                    });
+
+                    #[cfg(any(target_arch = "wasm32", not(feature = "native_webview")))]
                     self.state.show(
                         &self.app_env,
                         &self.startup_options,

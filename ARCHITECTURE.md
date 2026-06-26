@@ -158,6 +158,7 @@ Update instructions:
 | re_view_text_document  | A simple View that shows a single text box.                                                                |
 | re_view_text_log       | A View that shows text entries in a table and scrolls with the active time.                                |
 | re_view_time_series    | A View that shows plots over Rerun timelines.                                                              |
+| re_view_web_page       | A native-only experimental View that embeds a configured web page.                                         |
 | re_viewer              | The Rerun Viewer                                                                                           |
 | re_viewport            | The central viewport panel of the Rerun viewer.                                                            |
 

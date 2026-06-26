@@ -10,9 +10,9 @@ use super::ws::WsPublisher;
 use rerun::external::{egui, re_log};
 
 /// Base speeds for keyboard control
-const BASE_LINEAR_SPEED: f64 = 0.5;   // m/s
-const BASE_ANGULAR_SPEED: f64 = 0.8;  // rad/s
-const FAST_MULTIPLIER: f64 = 2.0;     // Shift modifier
+const BASE_LINEAR_SPEED: f64 = 0.5; // m/s
+const BASE_ANGULAR_SPEED: f64 = 0.8; // rad/s
+const FAST_MULTIPLIER: f64 = 2.0; // Shift modifier
 
 /// Overlay styling
 const OVERLAY_PADDING: f32 = 10.0;
@@ -29,13 +29,13 @@ const ESTOP_ACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(220, 50, 50);
 /// Tracks which movement keys are currently held down.
 #[derive(Debug, Clone, Default)]
 struct KeyState {
-    forward: bool,   // W or Up
-    backward: bool,  // S or Down
-    left: bool,      // A or Left
-    right: bool,     // D or Right
-    strafe_l: bool,  // Q
-    strafe_r: bool,  // E
-    fast: bool,      // Shift held
+    forward: bool,  // W or Up
+    backward: bool, // S or Down
+    left: bool,     // A or Left
+    right: bool,    // D or Right
+    strafe_l: bool, // Q
+    strafe_r: bool, // E
+    fast: bool,     // Shift held
 }
 
 impl KeyState {
@@ -66,8 +66,8 @@ pub struct KeyboardHandler {
     ws: WsPublisher,
     state: KeyState,
     was_active: bool,
-    estop_flash: bool,  // true briefly after space pressed
-    engaged: bool,      // true when user has clicked the overlay to activate
+    estop_flash: bool, // true briefly after space pressed
+    engaged: bool,     // true when user has clicked the overlay to activate
 }
 
 impl KeyboardHandler {
@@ -93,8 +93,8 @@ impl KeyboardHandler {
         // If not engaged, don't capture any keys
         if !self.engaged {
             if self.was_active {
-                if let Err(e) = self.publish_stop() {
-                    re_log::warn!("Failed to send stop on disengage: {e}");
+                if let Err(err) = self.publish_stop() {
+                    re_log::warn!("Failed to send stop on disengage: {err}");
                 }
                 self.was_active = false;
             }
@@ -107,8 +107,8 @@ impl KeyboardHandler {
         // Check for emergency stop (Space key pressed - one-shot action)
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.state.reset();
-            if let Err(e) = self.publish_stop() {
-                re_log::warn!("Failed to send emergency stop: {e}");
+            if let Err(err) = self.publish_stop() {
+                re_log::warn!("Failed to send emergency stop: {err}");
             }
             self.was_active = false;
             self.estop_flash = true;
@@ -117,13 +117,13 @@ impl KeyboardHandler {
 
         // Publish twist command if keys are active, or stop if just released
         if self.state.any_active() {
-            if let Err(e) = self.publish_twist() {
-                re_log::warn!("Failed to publish twist command: {e}");
+            if let Err(err) = self.publish_twist() {
+                re_log::warn!("Failed to publish twist command: {err}");
             }
             self.was_active = true;
         } else if self.was_active {
-            if let Err(e) = self.publish_stop() {
-                re_log::warn!("Failed to send stop on key release: {e}");
+            if let Err(err) = self.publish_stop() {
+                re_log::warn!("Failed to send stop on key release: {err}");
             }
             self.was_active = false;
         }
@@ -201,7 +201,11 @@ impl KeyboardHandler {
 
     fn draw_hud_content(&self, ui: &mut egui::Ui) {
         // Title
-        ui.label(egui::RichText::new("Keyboard Teleop").color(LABEL_COLOR).size(13.0));
+        ui.label(
+            egui::RichText::new("Keyboard Teleop")
+                .color(LABEL_COLOR)
+                .size(13.0),
+        );
         ui.add_space(4.0);
 
         // Key grid:  [Q] [W] [E]
@@ -236,16 +240,19 @@ impl KeyboardHandler {
 
         // Space bar (e-stop)
         let space_width = KEY_SIZE * 3.0 + KEY_GAP * 2.0;
-        let space_rect = ui.allocate_exact_size(
-            egui::vec2(space_width, KEY_SIZE * 0.7),
-            egui::Sense::hover(),
-        ).0;
+        let space_rect = ui
+            .allocate_exact_size(
+                egui::vec2(space_width, KEY_SIZE * 0.7),
+                egui::Sense::hover(),
+            )
+            .0;
         let space_bg = if self.estop_flash {
             ESTOP_ACTIVE_BG
         } else {
             KEY_INACTIVE_BG
         };
-        ui.painter().rect_filled(space_rect, egui::CornerRadius::same(4), space_bg);
+        ui.painter()
+            .rect_filled(space_rect, egui::CornerRadius::same(4), space_bg);
         ui.painter().text(
             space_rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -257,22 +264,33 @@ impl KeyboardHandler {
         ui.add_space(4.0);
 
         // Speed indicator
-        let speed_label = if self.state.fast { "⇧ FAST" } else { "⇧ shift=fast" };
+        let speed_label = if self.state.fast {
+            "⇧ FAST"
+        } else {
+            "⇧ shift=fast"
+        };
         let speed_color = if self.state.fast {
             egui::Color32::from_rgb(255, 200, 50)
         } else {
             LABEL_COLOR
         };
-        ui.label(egui::RichText::new(speed_label).color(speed_color).size(10.0));
+        ui.label(
+            egui::RichText::new(speed_label)
+                .color(speed_color)
+                .size(10.0),
+        );
     }
 
     fn draw_key(&self, ui: &mut egui::Ui, label: &str, pressed: bool) {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(KEY_SIZE, KEY_SIZE),
-            egui::Sense::hover(),
-        );
-        let bg = if pressed { KEY_ACTIVE_BG } else { KEY_INACTIVE_BG };
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(4), bg);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(KEY_SIZE, KEY_SIZE), egui::Sense::hover());
+        let bg = if pressed {
+            KEY_ACTIVE_BG
+        } else {
+            KEY_INACTIVE_BG
+        };
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), bg);
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -296,24 +314,24 @@ impl KeyboardHandler {
     }
 
     /// Convert current KeyState to Twist and publish via WebSocket.
-    fn publish_twist(&mut self) -> Result<(), super::ws::SendError> {
+    fn publish_twist(&self) -> Result<(), super::ws::SendError> {
         let (lin_x, lin_y, lin_z, ang_x, ang_y, ang_z) = self.compute_twist();
-        self.ws.send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z)?;
+        self.ws
+            .send_twist(lin_x, lin_y, lin_z, ang_x, ang_y, ang_z)?;
 
         if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
-            eprintln!(
-                "[DIMOS_DEBUG] Published twist: lin=({:.2},{:.2},{:.2}) ang=({:.2},{:.2},{:.2})",
-                lin_x, lin_y, lin_z, ang_x, ang_y, ang_z
+            re_log::debug!(
+                "[DIMOS_DEBUG] Published twist: lin=({lin_x:.2},{lin_y:.2},{lin_z:.2}) ang=({ang_x:.2},{ang_y:.2},{ang_z:.2})"
             );
         }
         Ok(())
     }
 
     /// Publish all-zero twist (stop command) via WebSocket.
-    fn publish_stop(&mut self) -> Result<(), super::ws::SendError> {
+    fn publish_stop(&self) -> Result<(), super::ws::SendError> {
         self.ws.send_stop()?;
         if std::env::var("DIMOS_DEBUG").is_ok_and(|v| v == "1") {
-            eprintln!("[DIMOS_DEBUG] Published stop command");
+            re_log::debug!("[DIMOS_DEBUG] Published stop command");
         }
         Ok(())
     }
