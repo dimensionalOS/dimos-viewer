@@ -300,7 +300,7 @@ impl Video {
 
             if needs_reset {
                 re_log::debug!(
-                    "DIAG video reset[ooo]: sample insertion overlapping active GOP (change {change_start}..{change_end}, delta {size_delta})"
+                    "Resetting video decoder: out-of-order sample insertion within the active GOP (change {change_start}..{change_end}, delta {size_delta})"
                 );
                 player.reset(&self.video_description).ok_or_log_error_once();
             } else {

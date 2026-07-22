@@ -667,14 +667,14 @@ impl<T: Default> VideoPlayer<T> {
                     // decode straight through the new IDR, no reset needed. The enqueue loop
                     // below picks up the new keyframe range.
                     re_log::debug!(
-                        "DIAG GOP rollover without reset (last_enqueued={last_enqueued}, requested_keyframe={requested_keyframe_idx})"
+                        "Continuing video decoder across GOP boundary (last enqueued {last_enqueued}, requested keyframe {requested_keyframe_idx})"
                     );
                     keyframe_idx
                 } else {
                     // Actual gap between the enqueued samples and the requested keyframe's GOP —
                     // we're skipping frames, so reset.
                     re_log::debug!(
-                        "DIAG video reset[skip]: gap to requested keyframe (last_enqueued={last_enqueued}, gop_start={requested_gop_start:?})"
+                        "Resetting video decoder: gap between enqueued samples and requested keyframe (last enqueued {last_enqueued}, GOP start {requested_gop_start:?})"
                     );
                     self.reset(video_description)?;
                     // Skip forward and just enqueue the requested keyframe.
@@ -829,7 +829,7 @@ impl<T: Default> VideoPlayer<T> {
     ) -> Result<(), VideoPlayerError> {
         // If we haven't decoded anything at all yet, reset the decoder.
         let Some(last_requested) = self.last_requested else {
-            re_log::debug!("DIAG video reset[1]: nothing requested yet (fresh start or follow-up to a prior reset)");
+            re_log::debug!("Resetting video decoder: nothing requested yet");
             return self.reset(video_description);
         };
 
@@ -846,7 +846,7 @@ impl<T: Default> VideoPlayer<T> {
             // For each new (!) error after entering the error state, we reset the decoder.
             // This way, it might later recover from the error as we progress in the video.
             re_log::debug!(
-                "DIAG video reset[2]: decode error: {}",
+                "Resetting video decoder after decode error: {}",
                 self.last_error
                     .as_ref()
                     .map(|e| e.latest_error.to_string())
@@ -862,7 +862,7 @@ impl<T: Default> VideoPlayer<T> {
             })
         {
             re_log::debug!(
-                "DIAG video reset[3]: seek forward >1 GOP (last_enqueued={:?}, requested={requested}, requested_keyframe={requested_keyframe})",
+                "Resetting video decoder: seeking forward by more than one GOP (last enqueued {:?}, requested sample {requested}, requested keyframe {requested_keyframe})",
                 self.last_enqueued
             );
             self.reset(video_description)?;
