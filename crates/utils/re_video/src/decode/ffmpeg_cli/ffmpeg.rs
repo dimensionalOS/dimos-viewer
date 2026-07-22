@@ -245,6 +245,7 @@ impl FFmpegProcessAndListener {
         encoding_details: Option<&VideoEncodingDetails>,
         ffmpeg_path: Option<&std::path::Path>,
         codec: &crate::VideoCodec,
+        low_latency: bool,
     ) -> Result<Self, Error> {
         re_tracing::profile_function!();
 
@@ -311,6 +312,15 @@ impl FFmpegProcessAndListener {
                 "-analyzeduration",
                 "0",
             ])
+            // Frame-multithreading adds roughly one frame of output delay per thread and
+            // ffmpeg defaults to the core count. For live streams a single decode thread
+            // cuts the holdback from ~17 frames to ~3 (measured, 720p H.264), and decode
+            // throughput of one thread is ample for typical stream resolutions.
+            .args(if low_latency {
+                &["-threads", "1"][..]
+            } else {
+                &[][..]
+            })
             // Keep in mind that all arguments that are about the input, need to go before!
             .format(codec_str) // TODO(andreas): should we check ahead of time whether this is available?
             //.fps_mode("0")
@@ -899,6 +909,7 @@ pub struct FFmpegCliDecoder {
     output_sender: Sender<FrameResult>,
     ffmpeg_path: Option<std::path::PathBuf>,
     codec: crate::VideoCodec,
+    low_latency: bool,
 }
 
 impl FFmpegCliDecoder {
@@ -908,6 +919,7 @@ impl FFmpegCliDecoder {
         output_sender: Sender<FrameResult>,
         ffmpeg_path: Option<std::path::PathBuf>,
         codec: &crate::VideoCodec,
+        low_latency: bool,
     ) -> Result<Self, Error> {
         re_tracing::profile_function!();
 
@@ -926,6 +938,7 @@ impl FFmpegCliDecoder {
             encoding_details,
             ffmpeg_path.as_deref(),
             codec,
+            low_latency,
         )?;
 
         Ok(Self {
@@ -934,6 +947,7 @@ impl FFmpegCliDecoder {
             output_sender,
             ffmpeg_path,
             codec: codec.clone(),
+            low_latency,
         })
     }
 }
@@ -990,13 +1004,14 @@ impl AsyncDecoder for FFmpegCliDecoder {
 
     fn reset(&mut self, video_descr: &VideoDataDescription) -> crate::decode::Result<()> {
         re_tracing::profile_function!();
-        re_log::trace!("Resetting ffmpeg decoder {}", self.debug_name);
+        re_log::debug!("Resetting ffmpeg decoder {}", self.debug_name);
         self.ffmpeg = FFmpegProcessAndListener::new(
             &self.debug_name,
             self.output_sender.clone(),
             video_descr.encoding_details.as_ref(),
             self.ffmpeg_path.as_deref(),
             &self.codec,
+            self.low_latency,
         )?;
         Ok(())
     }

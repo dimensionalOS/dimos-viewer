@@ -333,9 +333,7 @@ impl VideoStreamCache {
 
                 match result {
                     Err(VideoStreamProcessingError::OutOfOrderSamples) => {
-                        re_log::trace_once!(
-                            "Out-of-order chunk detected, performing delta re-merge"
-                        );
+                        re_log::debug!("Out-of-order chunk detected, performing delta re-merge");
                         match handle_out_of_order_chunk(
                             video_data,
                             &mut entry.known_chunk_ranges,
