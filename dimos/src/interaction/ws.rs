@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 pub enum SendError {
     /// The send queue is full; the event was dropped.
     QueueFull,
+
     /// Failed to serialize the event to JSON.
     Serialize(String),
 }
@@ -136,7 +137,7 @@ impl WsPublisher {
     }
 
     fn broadcast(&self, event: WsEvent) -> Result<(), SendError> {
-        let json = serde_json::to_string(&event).map_err(|e| SendError::Serialize(e.to_string()))?;
+        let json = serde_json::to_string(&event).map_err(|err| SendError::Serialize(err.to_string()))?;
         // Non-blocking: error if the channel is full rather than block the UI thread.
         self.tx.try_send(json).map_err(|_| SendError::QueueFull)
     }
