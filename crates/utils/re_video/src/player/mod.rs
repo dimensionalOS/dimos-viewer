@@ -655,17 +655,38 @@ impl<T: Default> VideoPlayer<T> {
             && let Some(keyframe_idx) = video_description.sample_keyframe_idx(last_enqueued)
         {
             if keyframe_idx < requested_keyframe_idx {
-                // Need to reset if we're skipping frames.
-                self.reset(video_description)?;
-                // Skip forward and just enqueue the requested keyframe.
-                self.enqueue_keyframe_range(
-                    video_description,
-                    requested_keyframe_idx,
-                    requested_sample_idx,
-                    get_video_buffer,
-                )?;
+                let requested_gop_start = video_description
+                    .keyframe_indices
+                    .get(requested_keyframe_idx)
+                    .copied();
 
-                requested_keyframe_idx
+                if requested_gop_start.is_some_and(|gop_start| last_enqueued + 1 >= gop_start) {
+                    // The enqueued samples lead contiguously into the requested keyframe's GOP.
+                    // This is the normal per-GOP rollover on live streams (the next GOP can never
+                    // be pre-enqueued there, since its samples don't exist yet): the decoder can
+                    // decode straight through the new IDR, no reset needed. The enqueue loop
+                    // below picks up the new keyframe range.
+                    re_log::debug!(
+                        "DIAG GOP rollover without reset (last_enqueued={last_enqueued}, requested_keyframe={requested_keyframe_idx})"
+                    );
+                    keyframe_idx
+                } else {
+                    // Actual gap between the enqueued samples and the requested keyframe's GOP —
+                    // we're skipping frames, so reset.
+                    re_log::debug!(
+                        "DIAG video reset[skip]: gap to requested keyframe (last_enqueued={last_enqueued}, gop_start={requested_gop_start:?})"
+                    );
+                    self.reset(video_description)?;
+                    // Skip forward and just enqueue the requested keyframe.
+                    self.enqueue_keyframe_range(
+                        video_description,
+                        requested_keyframe_idx,
+                        requested_sample_idx,
+                        get_video_buffer,
+                    )?;
+
+                    requested_keyframe_idx
+                }
             } else {
                 keyframe_idx
             }
@@ -768,8 +789,19 @@ impl<T: Default> VideoPlayer<T> {
 
         // Signal the end of the video if we reached it.
         // This is important for some decoders to flush out all the frames.
+        //
+        // Never signal it for stream-delivered video: a live stream has no end, and a
+        // brief ingest gap (>250ms, easily hit under load with a 200ms batcher tick)
+        // would otherwise be mistaken for the end of the video. Once new samples then
+        // arrive, the player has to fully reset the decoder — which for the ffmpeg CLI
+        // decoder means killing and respawning the process, once per gap.
+        // The tradeoff is that during a stall the last few frames stay unflushed in the
+        // decoder, so the frozen image is slightly staler.
         if !self.signaled_end_of_video
-            && !treat_video_as_live_stream(&self.config, video_description)
+            && matches!(
+                video_description.delivery_method,
+                crate::VideoDeliveryMethod::Static { .. }
+            )
             && self.enqueued_last_sample_of_video(video_description)
         {
             re_log::trace!("Signaling end of video");
@@ -797,6 +829,7 @@ impl<T: Default> VideoPlayer<T> {
     ) -> Result<(), VideoPlayerError> {
         // If we haven't decoded anything at all yet, reset the decoder.
         let Some(last_requested) = self.last_requested else {
+            re_log::debug!("DIAG video reset[1]: nothing requested yet (fresh start or follow-up to a prior reset)");
             return self.reset(video_description);
         };
 
@@ -812,6 +845,13 @@ impl<T: Default> VideoPlayer<T> {
 
             // For each new (!) error after entering the error state, we reset the decoder.
             // This way, it might later recover from the error as we progress in the video.
+            re_log::debug!(
+                "DIAG video reset[2]: decode error: {}",
+                self.last_error
+                    .as_ref()
+                    .map(|e| e.latest_error.to_string())
+                    .unwrap_or_default()
+            );
             self.reset(video_description)?;
         }
         // Reset if seeking forward by more than one GOP
@@ -821,6 +861,10 @@ impl<T: Default> VideoPlayer<T> {
                 enqueued_idx < video_description.keyframe_indices[last_keyframe]
             })
         {
+            re_log::debug!(
+                "DIAG video reset[3]: seek forward >1 GOP (last_enqueued={:?}, requested={requested}, requested_keyframe={requested_keyframe})",
+                self.last_enqueued
+            );
             self.reset(video_description)?;
         }
         // Previously signaled the end of the video, but encountering frames that are newer than the last enqueued.

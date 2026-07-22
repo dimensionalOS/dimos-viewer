@@ -990,7 +990,7 @@ impl AsyncDecoder for FFmpegCliDecoder {
 
     fn reset(&mut self, video_descr: &VideoDataDescription) -> crate::decode::Result<()> {
         re_tracing::profile_function!();
-        re_log::trace!("Resetting ffmpeg decoder {}", self.debug_name);
+        re_log::debug!("DIAG Resetting ffmpeg decoder {}", self.debug_name);
         self.ffmpeg = FFmpegProcessAndListener::new(
             &self.debug_name,
             self.output_sender.clone(),
