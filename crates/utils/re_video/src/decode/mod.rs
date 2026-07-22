@@ -310,6 +310,14 @@ pub fn new_decoder(
             output_sender,
             decode_settings.ffmpeg_path.clone(),
             &video.codec,
+            // Live streams want minimal decode latency: ffmpeg's frame-multithreading
+            // adds roughly one frame of delay per thread (measured: 17 frames held back
+            // at default/auto threads vs 3 with a single thread). For static assets
+            // keep the default for decode throughput.
+            matches!(
+                video.delivery_method,
+                crate::VideoDeliveryMethod::Stream { .. }
+            ),
         )?)),
 
         crate::VideoCodec::ImageSequence(codec) => {
