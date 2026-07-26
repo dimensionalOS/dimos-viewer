@@ -1,6 +1,6 @@
 [package]
 name = "dimos-viewer"
-version = "0.32.0-alpha.2"
+version = "0.32.0-alpha.3"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -21,6 +21,7 @@ analytics = ["rerun/analytics"]
 
 [dependencies]
 rerun = { path = "../crates/top/rerun", default-features = false, features = [
+  "map_view",
   "native_viewer",
   "run",
   "server",
