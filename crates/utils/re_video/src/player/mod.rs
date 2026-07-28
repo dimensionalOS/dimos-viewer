@@ -252,6 +252,20 @@ pub struct PlayerConfiguration {
     /// If we haven't seen new samples in this amount of time, we assume the video has ended
     /// and signal the end of the video to the decoder.
     pub time_until_video_assumed_ended: Duration,
+
+    /// How many samples may be missing between the last enqueued sample and the next GOP's
+    /// keyframe before we treat the rollover as a skip and reset the decoder.
+    ///
+    /// At the live edge the tail of a GOP is regularly still in flight when its successor's
+    /// IDR lands, leaving a gap of a frame or three. That is ingest jitter, not a seek, and
+    /// decoding through a handful of soon-to-be-stale frames is far cheaper than what a reset
+    /// costs — for the ffmpeg CLI decoder, killing and respawning the process.
+    ///
+    /// The tolerance stays well under a GOP on purpose: a genuine forward skip within the
+    /// previous GOP should still reset rather than decode its whole remainder for nothing.
+    /// (Skips of more than one GOP never reach this check — `handle_errors_and_reset_decoder_if_needed`
+    /// has already reset by then.)
+    pub tolerated_gop_rollover_gap_in_num_samples: usize,
 }
 
 impl Default for PlayerConfiguration {
@@ -260,6 +274,7 @@ impl Default for PlayerConfiguration {
             decoding_grace_delay_before_reporting: Duration::from_millis(400),
             tolerated_output_delay_in_num_frames: 3,
             time_until_video_assumed_ended: Duration::from_millis(250),
+            tolerated_gop_rollover_gap_in_num_samples: 16,
         }
     }
 }
@@ -679,19 +694,27 @@ impl<T: Default> VideoPlayer<T> {
                     .get(requested_keyframe_idx)
                     .copied();
 
-                if requested_gop_start.is_some_and(|gop_start| last_enqueued + 1 >= gop_start) {
-                    // The enqueued samples lead contiguously into the requested keyframe's GOP.
-                    // This is the normal per-GOP rollover on live streams (the next GOP can never
-                    // be pre-enqueued there, since its samples don't exist yet): the decoder can
-                    // decode straight through the new IDR, no reset needed. The enqueue loop
-                    // below picks up the new keyframe range.
+                if requested_gop_start.is_some_and(|gop_start| {
+                    last_enqueued + 1 + self.config.tolerated_gop_rollover_gap_in_num_samples
+                        >= gop_start
+                }) {
+                    // The enqueued samples lead into the requested keyframe's GOP, near enough to
+                    // decode through. This is the normal per-GOP rollover on live streams (the next
+                    // GOP can never be pre-enqueued there, since its samples don't exist yet): the
+                    // decoder can decode straight through the new IDR, no reset needed. The enqueue
+                    // loop below picks up the new keyframe range.
+                    //
+                    // The rollover need not be exactly contiguous. The tail of the old GOP is often
+                    // still in flight when the IDR arrives, and an IDR by definition resets
+                    // reference state, so feeding it to the running decoder is safe whether or not
+                    // the frames before it made it in.
                     re_log::debug!(
                         "Continuing video decoder across GOP boundary (last enqueued {last_enqueued}, requested keyframe {requested_keyframe_idx})"
                     );
                     keyframe_idx
                 } else {
-                    // Actual gap between the enqueued samples and the requested keyframe's GOP —
-                    // we're skipping frames, so reset.
+                    // Gap too wide to be live-edge jitter: we're skipping a meaningful stretch of
+                    // frames, so reset rather than decode the rest of the old GOP for nothing.
                     re_log::debug!(
                         "Resetting video decoder: gap between enqueued samples and requested keyframe (last enqueued {last_enqueued}, GOP start {requested_gop_start:?})"
                     );
