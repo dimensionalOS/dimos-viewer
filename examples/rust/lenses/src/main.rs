@@ -5,7 +5,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field};
 use rerun::external::re_log;
-use rerun::lenses::{Lens, Lenses, LensesSink, OutputMode, Selector, op};
+use rerun::lenses::{CastTo, Lens, Lenses, LensesSink, OutputMode, Selector};
 use rerun::sink::GrpcSink;
 use rerun::{
     ComponentDescriptor, DynamicArchetype, RecordingStream, Scalars, SerializedComponentColumn,
@@ -15,38 +15,37 @@ use rerun::{
 fn main() -> anyhow::Result<()> {
     re_log::setup_logging();
 
-    let instruction = Lens::for_input_column("example:Instruction:text")
-        .output_columns(|out| {
-            out.component(TextDocument::descriptor_text(), Selector::parse(".")?)
-        })?
-        .build();
+    let instruction = Lens::derive("example:Instruction:text")
+        .to_component(TextDocument::descriptor_text(), Selector::parse(".")?)
+        .build()?;
 
-    let destructure = Lens::for_input_column("example:Nested:payload")
-        .output_columns_at("nested/a", |out| {
-            out.component(
-                Scalars::descriptor_scalars(),
-                Selector::parse(".a")?.pipe(op::cast(DataType::Float64)),
-            )
-        })?
-        .output_columns_at("nested/b", |out| {
-            out.component(Scalars::descriptor_scalars(), Selector::parse(".b")?)
-        })?
-        .build();
+    let destructure_a = Lens::derive("example:Nested:payload")
+        .output_entity("nested/a")
+        .to_component_with_cast(
+            Scalars::descriptor_scalars(),
+            Selector::parse(".a")?,
+            CastTo::Auto,
+        )
+        .build()?;
 
-    let time = Lens::for_input_column("my_timestamp")
-        .output_columns(|out| {
-            out.time(
-                "my_timeline",
-                rerun::time::TimeType::Sequence,
-                Selector::parse(".")?,
-            )?
-            .component(ComponentDescriptor::partial("value"), Selector::parse(".")?)
-        })?
-        .build();
+    let destructure_b = Lens::derive("example:Nested:payload")
+        .output_entity("nested/b")
+        .to_component(Scalars::descriptor_scalars(), Selector::parse(".b")?)
+        .build()?;
+
+    let time = Lens::derive("my_timestamp")
+        .to_timeline(
+            "my_timeline",
+            rerun::time::TimeType::Sequence,
+            Selector::parse(".")?,
+        )
+        .to_component(ComponentDescriptor::partial("value"), Selector::parse(".")?)
+        .build()?;
 
     let lenses = Lenses::new(OutputMode::DropUnmatched)
         .add_lens(instruction)
-        .add_lens(destructure)
+        .add_lens(destructure_a)
+        .add_lens(destructure_b)
         .add_lens(time);
 
     let lenses_sink = LensesSink::new(GrpcSink::default(), lenses);

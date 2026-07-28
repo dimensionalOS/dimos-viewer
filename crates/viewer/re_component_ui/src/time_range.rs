@@ -7,7 +7,9 @@ use re_ui::{
     RelativeTimeRange, TimeDragValue, UiExt as _, relative_time_range_boundary_label_text,
     relative_time_range_label_text,
 };
-use re_viewer_context::{MaybeMutRef, StoreViewContext, TimeControlCommand};
+use re_viewer_context::{
+    AppContext, MaybeMutRef, TimeControlCommand, TimeRangeHighlight, TimeRangeHighlightKind,
+};
 
 struct RecordingTimeContext {
     time_type: TimeType,
@@ -19,7 +21,7 @@ struct RecordingTimeContext {
 ///
 /// The `TimeRange` component is stored in the blueprint but represents a range on the
 /// recording timeline, so we need the active recording's time control and data.
-fn recording_time_context(ctx: &StoreViewContext<'_>) -> Option<RecordingTimeContext> {
+fn recording_time_context(ctx: &AppContext<'_>) -> Option<RecordingTimeContext> {
     let time_ctrl = ctx.active_time_ctrl()?;
     let time_type = time_ctrl.time_type()?;
 
@@ -36,7 +38,7 @@ fn recording_time_context(ctx: &StoreViewContext<'_>) -> Option<RecordingTimeCon
         time_ctrl
             .time_i64()
             .unwrap_or_default()
-            .at_least(*time_drag_value.range.start()),
+            .at_least(time_drag_value.range.start),
     ); // accounts for static time (TimeInt::MIN)
 
     Some(RecordingTimeContext {
@@ -47,7 +49,7 @@ fn recording_time_context(ctx: &StoreViewContext<'_>) -> Option<RecordingTimeCon
 }
 
 pub fn time_range_multiline_edit_or_view_ui(
-    ctx: &StoreViewContext<'_>,
+    ctx: &AppContext<'_>,
     ui: &mut egui::Ui,
     value: &mut MaybeMutRef<'_, TimeRange>,
 ) -> egui::Response {
@@ -118,10 +120,17 @@ pub fn time_range_multiline_edit_or_view_ui(
         }
     };
 
-    if ui.rect_contains_pointer(response.rect) {
+    if ui.rect_contains_pointer(response.rect)
+        && let Some(time_ctrl) = ctx.active_time_ctrl()
+    {
         let absolute_range = AbsoluteTimeRange::from_relative_time_range(value, current_time);
         ctx.send_time_commands_to_active_recording([TimeControlCommand::HighlightRange(
-            absolute_range,
+            TimeRangeHighlight {
+                range: absolute_range,
+                timeline: *time_ctrl.timeline_name(),
+                kind: TimeRangeHighlightKind::TimeRangeConfiguration,
+                color: None,
+            },
         )]);
     }
 
@@ -129,7 +138,7 @@ pub fn time_range_multiline_edit_or_view_ui(
 }
 
 pub fn time_range_singleline_view_ui(
-    ctx: &StoreViewContext<'_>,
+    ctx: &AppContext<'_>,
     ui: &mut egui::Ui,
     value: &mut MaybeMutRef<'_, TimeRange>,
 ) -> egui::Response {
@@ -155,10 +164,17 @@ pub fn time_range_singleline_view_ui(
         res = res.on_hover_text(on_hover);
     }
 
-    if res.hovered() {
+    if res.hovered()
+        && let Some(time_ctrl) = ctx.active_time_ctrl()
+    {
         let absolute_range = AbsoluteTimeRange::from_relative_time_range(value, current_time);
         ctx.send_time_commands_to_active_recording([TimeControlCommand::HighlightRange(
-            absolute_range,
+            TimeRangeHighlight {
+                range: absolute_range,
+                timeline: *time_ctrl.timeline_name(),
+                kind: TimeRangeHighlightKind::TimeRangeConfiguration,
+                color: None,
+            },
         )]);
     }
 
@@ -166,7 +182,7 @@ pub fn time_range_singleline_view_ui(
 }
 
 fn view_visible_history_boundary_ui(
-    ctx: &StoreViewContext<'_>,
+    ctx: &AppContext<'_>,
     ui: &mut egui::Ui,
     visible_history_boundary: &TimeRangeBoundary,
     time_type: TimeType,

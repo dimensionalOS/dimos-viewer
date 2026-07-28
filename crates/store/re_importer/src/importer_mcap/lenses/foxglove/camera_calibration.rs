@@ -1,4 +1,4 @@
-use re_lenses::{Lens, LensBuilderError, op};
+use re_lenses::{CastTo, Lens, LensBuilderError, op};
 use re_lenses_core::Selector;
 use re_log_types::TimeType;
 use re_sdk_types::archetypes::Pinhole;
@@ -11,29 +11,28 @@ use super::{FOXGLOVE_TIMESTAMP, IMAGE_PLANE_SUFFIX};
 ///
 /// [`foxglove.CameraCalibration`]: https://docs.foxglove.dev/docs/sdk/schemas/camera-calibration
 pub fn camera_calibration(time_type: TimeType) -> Result<Lens, LensBuilderError> {
-    Ok(Lens::for_input_column("foxglove.CameraCalibration:message")
-        .output_columns(|out| {
-            out.time(
-                FOXGLOVE_TIMESTAMP,
-                time_type,
-                Selector::parse(".timestamp")?.pipe(op::timespec_to_nanos()),
-            )?
-            .component(
-                Pinhole::descriptor_child_frame(),
-                Selector::parse(".frame_id")?.pipe(op::string_suffix_nonempty(IMAGE_PLANE_SUFFIX)),
-            )?
-            .component(
-                Pinhole::descriptor_resolution(),
-                Selector::parse(".")?.pipe(op::struct_to_fixed_size_list_f32(["width", "height"])),
-            )?
-            .component(
-                Pinhole::descriptor_image_from_camera(),
-                Selector::parse(".K")?.pipe(row_major_3x3_to_column_major()),
-            )?
-            .component(
-                Pinhole::descriptor_parent_frame(),
-                Selector::parse(".frame_id")?,
-            )
-        })?
-        .build())
+    Lens::derive("foxglove.CameraCalibration:message")
+        .to_timeline(
+            FOXGLOVE_TIMESTAMP,
+            time_type,
+            Selector::parse(".timestamp")?.pipe(op::timespec_to_nanos()),
+        )
+        .to_component(
+            Pinhole::descriptor_child_frame(),
+            Selector::parse(".frame_id")?.pipe(op::string_suffix_nonempty(IMAGE_PLANE_SUFFIX)),
+        )
+        .to_component_with_cast(
+            Pinhole::descriptor_resolution(),
+            Selector::parse("pack(.width!, .height!)")?,
+            CastTo::Auto,
+        )
+        .to_component(
+            Pinhole::descriptor_image_from_camera(),
+            Selector::parse(".K")?.pipe(row_major_3x3_to_column_major()),
+        )
+        .to_component(
+            Pinhole::descriptor_parent_frame(),
+            Selector::parse(".frame_id")?,
+        )
+        .build()
 }

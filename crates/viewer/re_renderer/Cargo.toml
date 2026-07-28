@@ -32,7 +32,6 @@ ignored = [
   "js-sys", # Needed for wasm builds
   "getrandom",
   "wasm-bindgen",
-  "windows-core", # Need this to enable a feature that wgpu-hal doesn't activate correctly, see https://github.com/gfx-rs/wgpu/pull/9325
 ]
 
 
@@ -51,9 +50,6 @@ import-obj = ["dep:tobj"]
 ## Support importing binary & ascii .stl files
 import-stl = ["dep:stl_io"]
 
-## Enable (de)serialization using serde.
-serde = ["dep:serde"]
-
 [dependencies]
 re_byte_size.workspace = true
 re_error.workspace = true
@@ -61,7 +57,6 @@ re_log.workspace = true
 re_mutex.workspace = true
 re_quota_channel.workspace = true
 re_tracing.workspace = true
-re_tuid.workspace = true
 re_video = { workspace = true, default-features = true }
 
 ahash.workspace = true
@@ -85,6 +80,7 @@ parking_lot.workspace = true
 # This will hook them up to the puffin profiler as backend:
 profiling = { workspace = true, features = ["profile-with-puffin"] }
 regex-lite.workspace = true
+serde = { workspace = true, features = ["derive"] }
 slotmap.workspace = true
 smallvec.workspace = true
 static_assertions.workspace = true
@@ -95,17 +91,11 @@ wgpu.workspace = true
 # optional
 gltf = { workspace = true, optional = true }
 stl_io = { workspace = true, optional = true }
-serde = { workspace = true, features = ["derive"], optional = true }
 tobj = { workspace = true, optional = true }
 
 # native
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify.workspace = true
-
-# windows - ensure windows-core/std is enabled so wgpu-hal's gles backend compiles
-# See: https://github.com/gfx-rs/wgpu/pull/9325
-[target.'cfg(windows)'.dependencies]
-windows-core.workspace = true
 
 # web
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -119,6 +109,7 @@ wasm-bindgen.workspace = true
 
 [dev-dependencies]
 re_log = { workspace = true, features = ["setup"] }
+
 criterion.workspace = true
 pollster.workspace = true
 unindent.workspace = true
@@ -128,6 +119,10 @@ bench = false
 
 [[bench]]
 name = "bench_bounding_box"
+harness = false
+
+[[bench]]
+name = "bench_voxel_grid_draw_data"
 harness = false
 
 # For build.rs:

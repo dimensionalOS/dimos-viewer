@@ -97,7 +97,7 @@ impl Default for VerificationOptions {
     fn default() -> Self {
         Self {
             // 5 minutes to prevent clock skew
-            leeway: Some(Duration::from_secs(5 * 60)),
+            leeway: Some(Duration::from_mins(5)),
         }
     }
 }
@@ -164,7 +164,7 @@ impl RedapProvider {
     }
 
     /// Allow users from the given organization to authenticate via
-    /// their Rerun Cloud credentials.
+    /// their Rerun Hub credentials.
     #[cfg(feature = "oauth")]
     pub async fn with_rerun_cloud_provider(self, org_id: impl Into<String>) -> Result<Self, Error> {
         use crate::oauth::api;

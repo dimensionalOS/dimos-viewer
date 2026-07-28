@@ -1,16 +1,14 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::str::FromStr;
 
 use anyhow::Context as _;
-use re_protos::EntryName;
+use re_protos::common::v1alpha1::ext;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 #[cfg(windows)]
 use tokio::signal::windows::{ctrl_break, ctrl_close};
 use tracing::{info, warn};
 
-use crate::{ServerBuilder, ServerHandle};
+use crate::{NamedPath, NamedPathCollection, ServerBuilder, ServerHandle};
 
 // ---
 
@@ -84,37 +82,6 @@ impl Default for Args {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct NamedPath {
-    pub name: Option<String>,
-    pub path: PathBuf,
-}
-
-/// A named collection of paths.
-#[derive(Debug, Clone)]
-pub struct NamedPathCollection {
-    pub name: EntryName,
-    pub paths: Vec<PathBuf>,
-}
-
-impl FromStr for NamedPath {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Some((name, path)) = s.split_once('=') {
-            Ok(Self {
-                name: Some(name.to_owned()),
-                path: PathBuf::from(path),
-            })
-        } else {
-            Ok(Self {
-                name: None,
-                path: PathBuf::from(s),
-            })
-        }
-    }
-}
-
 impl Args {
     /// Waits for the server to start, and return a handle to it.
     ///
@@ -139,7 +106,7 @@ impl Args {
                     .with_rrds_as_dataset(
                         name,
                         paths,
-                        re_protos::common::v1alpha1::ext::IfDuplicateBehavior::Error,
+                        ext::IfDuplicateBehavior::Error,
                         crate::OnError::Continue,
                     )
                     .await?;
@@ -149,7 +116,7 @@ impl Args {
                 builder = builder
                     .with_directory_as_dataset(
                         dataset_prefix,
-                        re_protos::common::v1alpha1::ext::IfDuplicateBehavior::Error,
+                        ext::IfDuplicateBehavior::Error,
                         crate::OnError::Continue,
                     )
                     .await?;
@@ -157,15 +124,16 @@ impl Args {
 
             #[cfg_attr(not(feature = "lance"), expect(clippy::never_loop))]
             for table in &tables {
-                cfg_if::cfg_if! {
-                    if #[cfg(feature = "lance")] {
+                cfg_select! {
+                    feature = "lance" => {
                         builder = builder
                             .with_directory_as_table(
                                 table,
-                                re_protos::common::v1alpha1::ext::IfDuplicateBehavior::Error,
+                                ext::IfDuplicateBehavior::Error,
                             )
                             .await?;
-                    } else {
+                    }
+                    _ => {
                         _ = table;
                         anyhow::bail!("re_server was not compiled with the 'lance' feature");
                     }

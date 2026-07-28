@@ -117,7 +117,7 @@ fn generate_component_reflection(
         } else {
             // Works too
             let fqname = &obj.fqname;
-            quote!( ComponentType::new(#fqname) )
+            quote!( ComponentType::from(#fqname) )
         };
 
         let docstring_md = doc_as_lines(
@@ -146,8 +146,8 @@ fn generate_component_reflection(
             extension_contents_for_fqname
                 .get(&obj.fqname)
                 .is_some_and(|contents| {
-                    contents.contains(&format!("impl Default for {}", &obj.name))
-                        || contents.contains(&format!("impl Default for super::{}", &obj.name))
+                    contents.contains(&format!("impl Default for {}", obj.name))
+                        || contents.contains(&format!("impl Default for super::{}", obj.name))
                 });
         let custom_placeholder = if auto_derive_default || has_custom_default_impl {
             quote! { Some(#type_name::default().to_arrow()?) }
@@ -249,7 +249,7 @@ fn generate_archetype_reflection(reporter: &Reporter, objects: &Objects) -> Toke
         });
 
         let fqname = &obj.fqname;
-        let quoted_name = quote!( ArchetypeName::new(#fqname) );
+        let quoted_name = quote!( ArchetypeName::from(#fqname) );
         let display_name = re_case::to_human_case(&obj.name);
         if false {
             // We currently skip the docstring for the archetype itself,

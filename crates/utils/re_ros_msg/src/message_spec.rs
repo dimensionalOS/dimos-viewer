@@ -1,3 +1,4 @@
+use itertools::Itertools as _;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -43,6 +44,15 @@ pub struct MessageSpecification {
     pub constants: Vec<Constant>,
 }
 
+/// Returns the ROS package for a message name.
+///
+/// Relative message references resolve within the same package as the containing message.
+/// The package is the first path segment in names like `pkg/msg/Type` or `pkg/Type`.
+/// See <https://github.com/ros2/design/blob/gh-pages/articles/110_interface_definition.md>.
+pub fn message_package(name: &str) -> Option<&str> {
+    name.split_once('/').map(|(package, _)| package)
+}
+
 impl MessageSpecification {
     pub(super) fn parse(name: &str, input: &str) -> Result<Self, ParseError> {
         let mut fields = Vec::new();
@@ -80,11 +90,21 @@ impl MessageSpecification {
             }
         }
 
-        let spec = Self {
+        let mut spec = Self {
             name: name.to_owned(),
             fields,
             constants,
         };
+
+        // rosidl pads field-less messages with a `structure_needs_at_least_one_member`
+        // byte, except constants-only enum-like ones. Mirror that so our wire layout matches.
+        if spec.fields.is_empty() && !matches!(spec.underlying_type_if_enum_like(), Ok(Some(_))) {
+            spec.fields.push(Field {
+                ty: Type::BuiltIn(BuiltInType::UInt8),
+                name: "structure_needs_at_least_one_member".to_owned(),
+                default: None,
+            });
+        }
 
         // Sanity check: if this is an enum-like message that only contains constants,
         // try if we can determine the underlying type or fail early here.
@@ -95,14 +115,16 @@ impl MessageSpecification {
 
     /// Returns the primitive type of a constants-only enum-like specification.
     ///
-    /// A spec can be assumed enum-like when it has only constants definitions, no data fields,
-    /// and all constants share the same built-in type.
-    ///
-    /// For example, this has `int8` as its underlying type:
+    /// A spec is enum-like when it has no data fields and all constants share one built-in
+    /// type that is a single octet. For example, this has `int8` as its underlying type:
     /// ```text
     /// int8 FOO=0
     /// int8 BAR=1
     /// ```
+    ///
+    /// Constants are never serialized, so on the wire a constants-only message is a single
+    /// padding octet. A wider constant type would read the wrong number of bytes, so we report it
+    /// as non-enum-like and treat it as a padded struct instead.
     pub fn underlying_type_if_enum_like(&self) -> Result<Option<&BuiltInType>, ParseError> {
         if !self.fields.is_empty() || self.constants.is_empty() {
             return Ok(None);
@@ -120,12 +142,20 @@ impl MessageSpecification {
 
         for constant in &self.constants[1..] {
             if constant.ty != Type::BuiltIn(first_type.clone()) {
-                // Ambiguous typing can't be handled.
-                return Err(ParseError::Validate(format!(
-                    "constants-only spec `{}` uses mixed constant types",
-                    self.name
-                )));
+                // Mixed constant types are not enum-like, so this is a padded struct.
+                return Ok(None);
             }
+        }
+
+        if !matches!(
+            first_type,
+            BuiltInType::Bool
+                | BuiltInType::Byte
+                | BuiltInType::Char
+                | BuiltInType::Int8
+                | BuiltInType::UInt8
+        ) {
+            return Ok(None);
         }
 
         Ok(Some(first_type))
@@ -271,11 +301,23 @@ pub enum BuiltInType {
     WString(Option<usize>), // Optional max length for bounded wide strings.
 }
 
+/// A ROS message field type parsed from a `.msg` definition.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
+    /// A primitive ROS field type, such as `int32`, `float64`, or `string`.
     BuiltIn(BuiltInType),
-    Complex(ComplexType), // Possibly qualified with package path, e.g. `pkg/Type
-    Array { ty: Box<Self>, size: ArraySize },
+
+    /// A message type reference, either relative (`Header`) or fully-qualified (`std_msgs/Header`).
+    Complex(ComplexType),
+
+    /// A fixed-size, bounded, or unbounded array of another field type.
+    Array {
+        /// The element type stored by the array.
+        ty: Box<Self>,
+
+        /// The declared array size constraint.
+        size: ArraySize,
+    },
 }
 
 impl Type {
@@ -340,7 +382,10 @@ impl Type {
     }
 }
 
-/// A complex (non-primitive) type, possibly qualified with a package path.
+/// A complex (non-primitive) message type reference.
+///
+/// ROS resolves relative message references within the same package as the containing message.
+/// See <https://github.com/ros2/design/blob/gh-pages/articles/110_interface_definition.md>.
 ///
 /// Examples:
 /// ```text
@@ -495,7 +540,7 @@ impl Literal {
                         .map(|e| e.trim())
                         .filter(|e| !e.is_empty())
                         .map(|elem_str| Self::parse(elem_str, elem_ty))
-                        .collect::<Result<Vec<_>, ParseError>>()?;
+                        .try_collect()?;
 
                     Ok(Self::Array(elems))
                 }
@@ -565,11 +610,9 @@ fn strip_comment(s: &str) -> &str {
             continue;
         }
         match c {
-            '\\' => {
-                // escape next character only inside quotes; outside it doesn't matter for '#'
-                if in_quote {
-                    escaped = true;
-                }
+            // Escape the next character only inside quotes; outside it doesn't matter for '#'.
+            '\\' if in_quote => {
+                escaped = true;
             }
             '"' | '\'' => {
                 if !in_quote {
@@ -758,18 +801,42 @@ int8 BAR=1
         );
     }
 
-    /// Tests that constants-only enum-like specs reject mixed primitive constant types.
+    /// Mixed constant types are not enum-like, so they become padded structs.
     #[test]
-    fn constants_only_spec_rejects_mixed_enum_types() {
-        let result = MessageSpecification::parse(
+    fn constants_only_spec_with_mixed_types_is_a_padded_struct() {
+        let spec = MessageSpecification::parse(
             "test/DummyEnum",
             r#"
 int8 FOO=0
 uint8 BAR=1
 "#,
-        );
+        )
+        .unwrap();
 
-        assert!(result.is_err());
+        assert_eq!(spec.underlying_type_if_enum_like().unwrap(), None);
+        assert_eq!(spec.fields.len(), 1);
+        assert_eq!(spec.fields[0].name, "structure_needs_at_least_one_member");
+        assert_eq!(spec.fields[0].ty, Type::BuiltIn(BuiltInType::UInt8));
+    }
+
+    /// Tests that constants-only specs wider than one octet are padded structs, not enum-like.
+    #[test]
+    fn constants_only_spec_with_wide_type_is_a_padded_struct() {
+        // Constants are never serialized, so on the wire this is a single padding octet.
+        // Collapsing to `int32` would read/write four bytes and corrupt the message.
+        let spec = MessageSpecification::parse(
+            "test/WideEnum",
+            r#"
+int32 FOO=0
+int32 BAR=1
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(spec.underlying_type_if_enum_like().unwrap(), None);
+        assert_eq!(spec.fields.len(), 1);
+        assert_eq!(spec.fields[0].name, "structure_needs_at_least_one_member");
+        assert_eq!(spec.fields[0].ty, Type::BuiltIn(BuiltInType::UInt8));
     }
 
     #[test]

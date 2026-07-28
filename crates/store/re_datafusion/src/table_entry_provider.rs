@@ -15,19 +15,23 @@ use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
+use parking_lot::Mutex;
 use re_log_types::{EntryId, EntryIdOrName};
 use re_protos::cloud::v1alpha1::ext::{EntryDetails, TableInsertMode};
 use re_protos::cloud::v1alpha1::{
     EntryFilter, EntryKind, FindEntriesRequest, GetTableSchemaRequest, ScanTableRequest,
     ScanTableResponse,
 };
-use re_redap_client::{ApiError, ApiResult, ConnectionClient};
+use re_protos::headers::RerunHeadersInjectorExt as _;
+use re_redap_client::{ApiError, ApiResult, ConnectionAnalyticsExporter, ConnectionClient};
 use tokio::runtime::Handle;
 use tracing::instrument;
 
 use crate::IntoDfError as _;
-use crate::grpc_streaming_provider::{GrpcStreamProvider, GrpcStreamToTable};
+use crate::analytics::{TableQueryInfo, expr_filter_signature};
+use crate::grpc_streaming_provider::{GrpcStreamProvider, GrpcStreamToTable, ScanParams};
 use crate::wasm_compat::make_future_send;
+use crate::{ConnectionAnalytics, PendingTableQueryAnalytics, TableKind, TableQueryCaller};
 
 #[derive(Clone)]
 pub struct TableEntryTableProvider {
@@ -41,6 +45,24 @@ pub struct TableEntryTableProvider {
     /// Captured at construction so DataFusion-spawned execution tasks can re-attach
     /// the caller's tracing span — otherwise gRPC spans below surface as root traces.
     parent_span: tracing::Span,
+
+    /// Per-connection analytics sink. `None` ⇒ no analytics emitted for this provider.
+    analytics: Option<ConnectionAnalytics>,
+
+    /// What initiated this provider's scans. Defaults to `CatalogResolver`; should
+    /// be set explicitly via [`Self::with_caller`] when the caller is known.
+    caller: TableQueryCaller,
+
+    /// Underlying provider variant for analytics. Defaults to `Unknown`; set via
+    /// [`Self::with_table_kind`] when the caller already has the `ProviderDetails`.
+    table_kind: TableKind,
+
+    /// Filter expressions offered by DataFusion at planning time, stored for
+    /// inclusion in the `cloud_scan_table` analytics span.
+    ///
+    /// `Arc` so that the value survives the clone that `GrpcStreamProvider::scan`
+    /// makes when constructing partition streams.
+    filter_capture: Arc<Mutex<Option<(u32, String)>>>,
 }
 
 impl std::fmt::Debug for TableEntryTableProvider {
@@ -64,11 +86,39 @@ impl TableEntryTableProvider {
             table_id: None,
             runtime,
             parent_span: tracing::Span::current(),
+            analytics: None,
+            caller: TableQueryCaller::CatalogResolver,
+            table_kind: TableKind::Unknown,
+            filter_capture: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn new_entry_list(client: ConnectionClient, runtime: Option<Handle>) -> Self {
         Self::new(client, "__entries", runtime)
+            .with_caller(TableQueryCaller::EntriesTable)
+            .with_table_kind(TableKind::SystemEntries)
+    }
+
+    /// Enable per-scan analytics for this provider.
+    ///
+    /// Without this call no `cloud_scan_table` span will be emitted.
+    pub fn with_analytics(mut self, exporter: ConnectionAnalyticsExporter) -> Self {
+        self.analytics = Some(ConnectionAnalytics::new(exporter));
+        self
+    }
+
+    /// Set the caller identity recorded in the analytics span. Has no effect
+    /// unless [`Self::with_analytics`] is also set.
+    pub fn with_caller(mut self, caller: TableQueryCaller) -> Self {
+        self.caller = caller;
+        self
+    }
+
+    /// Set the underlying table kind recorded in the analytics span. Has no
+    /// effect unless [`Self::with_analytics`] is also set.
+    pub fn with_table_kind(mut self, table_kind: TableKind) -> Self {
+        self.table_kind = table_kind;
+        self
     }
 
     /// This is a convenience function
@@ -96,7 +146,12 @@ impl TableEntryTableProvider {
                             filter: Some(EntryFilter {
                                 id: None,
                                 name: Some(table_name_copy),
+                                // Pass both `entry_kind` (deprecated) and `entry_kinds`
+                                // to be compatible with old Hub versions.
+                                // Drop `entry_kind` when no customer has a 0.14 deployment
+                                // or older of Rerun Hub.
                                 entry_kind: Some(EntryKind::Table as i32),
+                                entry_kinds: vec![EntryKind::Table as i32],
                             }),
                         })
                         .await
@@ -140,9 +195,11 @@ impl GrpcStreamToTable for TableEntryTableProvider {
 
     #[instrument(skip(self), err, parent = &self.parent_span)]
     async fn fetch_schema(&mut self) -> ApiResult<SchemaRef> {
-        let request = GetTableSchemaRequest {
-            table_id: Some(self.table_id().await?.into()),
-        };
+        let table_id = self.table_id().await?;
+        let request = tonic::Request::new(GetTableSchemaRequest {
+            table_id: Some(table_id.into()),
+        })
+        .with_entry_id(table_id);
 
         let mut client = self.client.clone();
 
@@ -177,13 +234,16 @@ impl GrpcStreamToTable for TableEntryTableProvider {
         ))
     }
 
-    #[instrument(skip(self), err, parent = &self.parent_span)]
+    #[instrument(skip(self, _params), err, parent = &self.parent_span)]
     async fn send_streaming_request(
         &mut self,
+        _params: &ScanParams,
     ) -> ApiResult<re_redap_client::ApiResponseStream<Self::GrpcStreamData>> {
-        let request = ScanTableRequest {
-            table_id: Some(self.table_id().await?.into()),
-        };
+        let table_id = self.table_id().await?;
+        let request = tonic::Request::new(ScanTableRequest {
+            table_id: Some(table_id.into()),
+        })
+        .with_entry_id(table_id);
 
         let mut client = self.client.clone();
 
@@ -202,7 +262,11 @@ impl GrpcStreamToTable for TableEntryTableProvider {
         ))
     }
 
-    fn process_response(&mut self, response: Self::GrpcStreamData) -> ApiResult<RecordBatch> {
+    fn process_response(
+        &mut self,
+        response: Self::GrpcStreamData,
+        _params: &ScanParams,
+    ) -> ApiResult<RecordBatch> {
         response
             .dataframe_part
             .ok_or_else(|| {
@@ -216,6 +280,67 @@ impl GrpcStreamToTable for TableEntryTableProvider {
                     "failed decoding /ScanTable response",
                 )
             })
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&datafusion::prelude::Expr],
+    ) -> datafusion::error::Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
+        let decisions =
+            vec![datafusion::logical_expr::TableProviderFilterPushDown::Unsupported; filters.len()];
+
+        let sigs: String = filters
+            .iter()
+            .map(|e| expr_filter_signature(e))
+            .collect::<Vec<_>>()
+            .join(";");
+
+        *self.filter_capture.lock() = Some((filters.len() as u32, sigs));
+
+        Ok(decisions)
+    }
+
+    fn begin_scan_analytics(
+        &self,
+        schema: &SchemaRef,
+        projection: Option<&Vec<usize>>,
+        limit: Option<usize>,
+    ) -> Option<PendingTableQueryAnalytics> {
+        let analytics = self.analytics.as_ref()?;
+
+        // `table_id` is `None` until the first `scan()` resolves it. For
+        // name-based providers this is normally cached by the time we get
+        // here (the schema fetch in `prepare()` calls `table_id()`).
+        let table_id = match (&self.table_id, &self.table) {
+            (Some(id), _) | (None, EntryIdOrName::Id(id)) => id.to_string(),
+            (None, EntryIdOrName::Name(name)) => name.clone(),
+        };
+
+        let schema_total_columns = schema.fields().len() as u32;
+        let projected_columns = projection
+            .map(|p| p.len() as u32)
+            .unwrap_or(schema_total_columns);
+
+        let (filters_total, filters_signatures) = self
+            .filter_capture
+            .lock()
+            .take()
+            .unwrap_or((0, String::new()));
+
+        let info = TableQueryInfo {
+            table_id,
+            table_kind: self.table_kind,
+            caller: self.caller,
+            schema_total_columns,
+            projected_columns,
+            has_limit: limit.is_some(),
+            limit_value: limit.map(|v| v as u64),
+            time_range: web_time::SystemTime::now()..web_time::SystemTime::now(),
+            filters_total,
+            filters_signatures,
+        };
+
+        Some(analytics.begin_table_query(info, web_time::Instant::now()))
     }
 
     async fn insert_into(
@@ -254,7 +379,7 @@ impl GrpcStreamToTable for TableEntryTableProvider {
 #[derive(Debug, Clone)]
 struct TableEntryWriterExec {
     client: ConnectionClient,
-    props: PlanProperties,
+    props: Arc<PlanProperties>,
     child: Arc<dyn ExecutionPlan>,
     runtime: Handle,
     table_id: EntryId,
@@ -283,7 +408,8 @@ impl TableEntryWriterExec {
                 Partitioning::UnknownPartitioning(default_partitioning),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )
+            .into(),
             child,
             runtime,
             table_id,
@@ -301,7 +427,7 @@ impl ExecutionPlan for TableEntryWriterExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
 

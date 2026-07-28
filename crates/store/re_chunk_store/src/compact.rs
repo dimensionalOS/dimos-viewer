@@ -45,6 +45,11 @@ pub struct CompactionOptions {
     ///
     /// `None` disables the split.
     pub split_size_ratio: Option<f64>,
+
+    /// If true, any user-supplied `VideoStream:is_keyframe` data is dropped and
+    /// re-derived from codec analysis during video rebatching. This bypasses
+    /// validation of the user-supplied labels.
+    pub fix_keyframe: bool,
 }
 
 impl ChunkStore {
@@ -54,7 +59,8 @@ impl ChunkStore {
     /// datatypes, up to the thresholds in the config. Large chunks may be split.
     ///
     /// If `is_start_of_gop` is provided, video stream chunks are rebatched to align
-    /// with GoP boundaries after compaction.
+    /// with GoP boundaries after compaction, and sparse `is_keyframe` marker chunks
+    /// are emitted.
     ///
     /// If `split_size_ratio` is provided, chunks are split on entry so no two
     /// archetype groups sharing a chunk differ in byte size by more than that factor.
@@ -103,6 +109,7 @@ impl ChunkStore {
             num_extra_passes,
             is_start_of_gop,
             split_size_ratio,
+            fix_keyframe,
         } = options;
 
         let num_extra_passes = num_extra_passes.unwrap_or(50);
@@ -159,13 +166,14 @@ impl ChunkStore {
                 &self,
                 config,
                 is_start_of_gop.as_ref(),
+                *fix_keyframe,
             ) {
                 Ok(new_store) => {
                     self = new_store;
                     re_log::info!(time = ?now.elapsed(), "video GoP rebatching completed");
                 }
                 Err(err) => {
-                    re_log::warn!(%err, "video GoP rebatching failed");
+                    return Err(ChunkStoreError::VideoRebatch(err));
                 }
             }
         }
@@ -194,6 +202,7 @@ mod tests {
             num_extra_passes: Some(0),
             is_start_of_gop: None,
             split_size_ratio: None,
+            fix_keyframe: false,
         };
         let result = store
             .finalize_compaction(&options)
@@ -257,6 +266,7 @@ mod tests {
             num_extra_passes: Some(3),
             is_start_of_gop: None,
             split_size_ratio: Some(10.0),
+            fix_keyframe: false,
         };
         let compacted = store.compacted(&options)?;
 
@@ -284,6 +294,69 @@ mod tests {
         Ok(())
     }
 
+    /// Regression lock for the `OBJECT_STORE` default: the profile must carry a
+    /// `split_size_ratio` that actually separates thick columns from thin ones when
+    /// wired through `compacted`, and no rows may be lost in the process.
+    #[test]
+    fn object_store_profile_splits_thick_from_thin() -> anyhow::Result<()> {
+        re_log::setup_logging();
+
+        let entity = EntityPath::from("camera");
+        let blob_bytes = 128 * 1024; // well above the scalar payload
+
+        let mut store = ChunkStore::new(
+            StoreId::random(StoreKind::Recording, "test_app"),
+            ChunkStoreConfig::ALL_DISABLED,
+        );
+        for frame in 0..4 {
+            store.insert_chunk(&mixed_chunk(&entity, frame, blob_bytes))?;
+        }
+
+        // Wire exactly as the `rrd optimize` / catalog ingestion paths do: the ratio
+        // comes from the profile, not a hard-coded literal. If someone resets
+        // `OBJECT_STORE.split_size_ratio` to `None`, this test fails.
+        let profile = crate::OptimizationProfile::OBJECT_STORE;
+        let options = CompactionOptions {
+            config: profile.to_chunk_store_config(),
+            num_extra_passes: Some(3),
+            is_start_of_gop: None,
+            split_size_ratio: profile.split_size_ratio,
+            fix_keyframe: false,
+        };
+        let compacted = store.compacted(&options)?;
+
+        // No output chunk may mix the two archetypes.
+        for chunk in compacted.iter_physical_chunks() {
+            let archetypes: std::collections::BTreeSet<_> = chunk
+                .components()
+                .values()
+                .map(|c| c.descriptor.archetype)
+                .collect();
+            assert_eq!(
+                archetypes.len(),
+                1,
+                "OBJECT_STORE profile left a chunk mixing archetypes: {archetypes:?}",
+            );
+        }
+
+        // Every row of every archetype must survive the split: 4 frames each.
+        let rows_for = |archetype: ArchetypeName| -> u64 {
+            compacted
+                .iter_physical_chunks()
+                .filter(|c| {
+                    c.components()
+                        .values()
+                        .any(|c| c.descriptor.archetype == Some(archetype))
+                })
+                .map(|c| c.num_rows() as u64)
+                .sum()
+        };
+        assert_eq!(rows_for(ArchetypeName::from("my.Video")), 4);
+        assert_eq!(rows_for(ArchetypeName::from("my.Points")), 4);
+
+        Ok(())
+    }
+
     #[test]
     fn compacted_leaves_mixed_chunk_alone_without_ratio() -> anyhow::Result<()> {
         re_log::setup_logging();
@@ -302,6 +375,7 @@ mod tests {
             num_extra_passes: Some(3),
             is_start_of_gop: None,
             split_size_ratio: None,
+            fix_keyframe: false,
         };
         let compacted = store.compacted(&options)?;
 

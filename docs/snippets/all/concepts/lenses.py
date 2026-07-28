@@ -1,9 +1,16 @@
-"""Use lenses to extract struct fields and reroute data to a different entity."""
+"""Use lenses to extract struct fields and reroute data to another entity."""
 
 import pyarrow as pa
 
 import rerun as rr
-from rerun.experimental import Chunk, LazyChunkStream, Lens, LensOutput, Selector, send_chunk
+from rerun.experimental import (
+    Chunk,
+    DeriveLens,
+    LazyChunkStream,
+    MutateLens,
+    Selector,
+    send_chunks,
+)
 
 rr.init("rerun_example_lenses", spawn=True)
 
@@ -21,41 +28,46 @@ status_data = pa.array(["ok", "ok", "warn"], type=pa.utf8())
 chunk = Chunk.from_columns(
     "/sensor/imu",
     indexes=[rr.TimeColumn("frame", sequence=[0, 1, 2])],
-    columns=rr.DynamicArchetype.columns(archetype="Imu", components={"accel": imu_data, "status": status_data}),
+    columns=rr.DynamicArchetype.columns(
+        archetype="Imu", components={"accel": imu_data, "status": status_data}
+    ),
 )
 # endregion: log_data
 
 # Extract the "x" field as a Scalar on the same entity.
-extract_x = Lens(
-    "Imu:accel",
-    LensOutput().to_component(rr.Scalars.descriptor_scalars(), ".x"),
+extract_x = DeriveLens("Imu:accel").to_component(
+    rr.Scalars.descriptor_scalars(), ".x"
 )
 
-# region: lens_definition
-# Extract the "y" field to a different entity and the "elapsed" field as a new timeline.
-extract_y = Lens(
-    "Imu:accel",
-    to_entity={
-        "/new_entity/accel_y": LensOutput()
-        .to_component(rr.Scalars.descriptor_scalars(), ".y")
-        .to_timeline("sensor_elapsed", "duration_ns", ".elapsed")
-    },
+# region: derive_lens
+# Extract the "y" field to a different entity and the "elapsed" field as a
+# new timeline.
+extract_y = (
+    DeriveLens("Imu:accel", output_entity="/new_entity/accel_y")
+    .to_component(rr.Scalars.descriptor_scalars(), ".y")
+    .to_timeline("sensor_elapsed", "duration_ns", ".elapsed")
 )
-# endregion: lens_definition
+# endregion: derive_lens
+
+# region: mutate_lens
+# Simplify the accel struct to just its "x" field in-place.
+simplify_accel = MutateLens("Imu:accel", ".x")
+# endregion: mutate_lens
 
 # region: pipe_example
 # Use pipe to apply a custom transformation after extracting a field.
-extract_scaled_x = Lens(
-    "Imu:accel",
-    LensOutput().to_component(
-        rr.Scalars.descriptor_scalars(),
-        Selector(".x").pipe(lambda arr: pa.compute.multiply(arr, 9.81)),
-    ),
+extract_scaled_x = DeriveLens(
+    "Imu:accel", output_entity="/new_entity/accel_scaled_x"
+).to_component(
+    rr.Scalars.descriptor_scalars(),
+    Selector(".x").pipe(lambda arr: pa.compute.multiply(arr, 9.81)),
 )
 # endregion: pipe_example
 
 # Apply all lenses via the ChunkStream API and send the resulting chunks.
 stream = LazyChunkStream.from_iter([chunk])
-results = stream.lenses([extract_x, extract_y, extract_scaled_x], output_mode="forward_unmatched")
-for result in results:
-    send_chunk(result)
+results = stream.lenses(
+    [extract_x, extract_y, simplify_accel, extract_scaled_x],
+    output_mode="forward_unmatched",
+)
+send_chunks(results)

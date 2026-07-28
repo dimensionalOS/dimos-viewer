@@ -3,17 +3,14 @@ use std::collections::BTreeMap;
 use super::MessageDecoder;
 use crate::parsers::MessageParser;
 use crate::parsers::ros2msg::Ros2MessageParser;
-use crate::parsers::ros2msg::geometry_msgs::PoseStampedMessageParser;
-use crate::parsers::ros2msg::rcl_interfaces::LogMessageParser;
 use crate::parsers::ros2msg::sensor_msgs::{
-    BatteryStateMessageParser, CameraInfoMessageParser, CompressedImageMessageParser,
-    FluidPressureMessageParser, IlluminanceMessageParser, ImageMessageParser, ImuMessageParser,
-    JointStateMessageParser, JoyMessageParser, MagneticFieldMessageParser, NavSatFixMessageParser,
-    PointCloud2MessageParser, RangeMessageParser, RelativeHumidityMessageParser,
-    TemperatureMessageParser,
+    BatteryStateMessageParser, CompressedImageMessageParser, FluidPressureMessageParser,
+    IlluminanceMessageParser, ImageMessageParser, ImuMessageParser, JointStateMessageParser,
+    JoyMessageParser, NavSatFixMessageParser, PointCloud2MessageParser, RangeMessageParser,
+    RelativeHumidityMessageParser, TemperatureMessageParser,
 };
 use crate::parsers::ros2msg::std_msgs::{
-    Float64ArrayMessageParser, Float64MultiArrayMessageParser, StringMessageParser,
+    Float64ArrayMessageParser, Float64MultiArrayMessageParser,
 };
 use crate::parsers::ros2msg::tf2_msgs::tf_message::TfMessageParser;
 
@@ -36,13 +33,8 @@ impl McapRos2Decoder {
     /// Creates a new [`McapRos2Decoder`] with all supported message types pre-registered
     pub fn new() -> Self {
         Self::empty()
-            // geometry_msgs
-            .register_parser::<PoseStampedMessageParser>("geometry_msgs/msg/PoseStamped")
-            // rcl_interfaces
-            .register_parser::<LogMessageParser>("rcl_interfaces/msg/Log")
             // sensor_msgs
             .register_parser::<BatteryStateMessageParser>("sensor_msgs/msg/BatteryState")
-            .register_parser::<CameraInfoMessageParser>("sensor_msgs/msg/CameraInfo")
             .register_parser::<CompressedImageMessageParser>("sensor_msgs/msg/CompressedImage")
             .register_parser::<FluidPressureMessageParser>("sensor_msgs/msg/FluidPressure")
             .register_parser::<IlluminanceMessageParser>("sensor_msgs/msg/Illuminance")
@@ -50,7 +42,6 @@ impl McapRos2Decoder {
             .register_parser::<ImuMessageParser>("sensor_msgs/msg/Imu")
             .register_parser::<JoyMessageParser>("sensor_msgs/msg/Joy")
             .register_parser::<JointStateMessageParser>("sensor_msgs/msg/JointState")
-            .register_parser::<MagneticFieldMessageParser>("sensor_msgs/msg/MagneticField")
             .register_parser::<NavSatFixMessageParser>("sensor_msgs/msg/NavSatFix")
             .register_parser::<PointCloud2MessageParser>("sensor_msgs/msg/PointCloud2")
             .register_parser::<RangeMessageParser>("sensor_msgs/msg/Range")
@@ -59,7 +50,6 @@ impl McapRos2Decoder {
             // std_msgs
             .register_parser::<Float64ArrayMessageParser>("std_msgs/msg/Float64Array")
             .register_parser::<Float64MultiArrayMessageParser>("std_msgs/msg/Float64MultiArray")
-            .register_parser::<StringMessageParser>("std_msgs/msg/String")
             // tf2_msgs
             .register_parser::<TfMessageParser>("tf2_msgs/msg/TFMessage")
     }

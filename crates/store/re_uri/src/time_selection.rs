@@ -1,9 +1,19 @@
-use re_log_types::{AbsoluteTimeRange, AbsoluteTimeRangeF, TimeCell, Timeline};
+use re_log_types::{AbsoluteTimeRange, AbsoluteTimeRangeF, TimeCell, Timeline, TimelineName};
 
 use crate::Error;
 
 /// A time range selection as used in URIs, qualified with a timeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    re_byte_size::SizeBytes,
+)]
 pub struct TimeSelection {
     pub timeline: Timeline,
     pub range: AbsoluteTimeRange,
@@ -93,6 +103,8 @@ impl std::str::FromStr for TimeSelection {
             )));
         }
 
+        let timeline = TimelineName::try_new(timeline)
+            .map_err(|err| Error::InvalidTimeRange(format!("Bad timeline name: {err}")))?;
         let timeline = Timeline::new(timeline, min.typ());
         let range = AbsoluteTimeRange::new(min, max);
 

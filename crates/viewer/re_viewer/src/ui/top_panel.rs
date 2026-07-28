@@ -1,6 +1,5 @@
 use egui::{
-    Align, Atom, Button, Color32, Id, Image, Layout, NumExt as _, Popup, RichText, Sense,
-    include_image,
+    Align, Atom, Button, Color32, Id, Image, Layout, Popup, RichText, Sense, include_image,
 };
 use emath::{Rect, RectAlign, Vec2};
 use re_format::format_uint;
@@ -25,13 +24,21 @@ pub fn top_panel(
     re_tracing::profile_function!();
 
     let style_like_web = app.is_screenshotting() || app.app_env().is_test();
+    let native_window_bar = !re_ui::fullsize_content(ui.os()) && !app.custom_window_decorations();
     let top_bar_style = ui.top_bar_style(frame, style_like_web);
-    let top_panel_frame = ui.tokens().top_panel_frame();
+    let window_frame = app.window_frame_config(ui.ctx());
+    let mut top_panel_frame = ui.tokens().top_panel_frame(window_frame);
+
+    if app.custom_window_decorations() {
+        // Keep the custom window buttons flush with the right edge. `custom_window_frame` is false
+        // on Windows, but we still draw custom caption buttons there.
+        top_panel_frame.inner_margin.right = 0;
+    }
 
     let mut content = |ui: &mut egui::Ui, show_content: bool| {
         // React to dragging and double-clicking the top bar:
         #[cfg(not(target_arch = "wasm32"))]
-        if !re_ui::native_window_bar(ui.os()) {
+        if !native_window_bar {
             // Interact with background first, so that buttons in the top bar gets input priority
             // (last added widget has priority for input).
             let title_bar_response = ui.interact(
@@ -74,10 +81,11 @@ pub fn top_panel(
 
     // On MacOS, we show the close/minimize/maximize buttons in the top panel.
     // We _always_ want to show the top panel in that case, and only hide its content.
-    if re_ui::native_window_bar(ui.os()) {
-        panel.show_animated_inside(ui, is_expanded, |ui| content(ui, is_expanded));
+    if native_window_bar {
+        let mut panel_expanded = is_expanded; // Note: can't resize top panel, or drag-to-close it.
+        panel.show_collapsible(ui, &mut panel_expanded, |ui| content(ui, is_expanded));
     } else {
-        panel.show_inside(ui, |ui| content(ui, is_expanded));
+        panel.show(ui, |ui| content(ui, is_expanded));
     }
 }
 
@@ -91,9 +99,6 @@ fn top_bar_ui(
     gpu_resource_stats: &WgpuResourcePoolStatistics,
 ) {
     app.rerun_menu_button_ui(frame.wgpu_render_state(), store_context, ui);
-
-    ui.add_space(12.0);
-    website_link_ui(ui);
 
     if !app.startup_options().web_history_enabled() {
         ui.add_space(12.0);
@@ -113,7 +118,7 @@ fn top_bar_ui(
                 ui.spacing_mut().item_spacing.x = 12.0;
 
                 // Varying widths:
-                memory_use_label_ui(ui, gpu_resource_stats);
+                memory_use_label_ui(ui, gpu_resource_stats, &app.external_memory_users);
                 frame_time_label_ui(ui, app);
                 fps_ui(ui, app);
 
@@ -153,8 +158,7 @@ fn top_bar_ui(
     }
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if re_ui::CUSTOM_WINDOW_DECORATIONS && !cfg!(target_arch = "wasm32") {
-            ui.add_space(8.0);
+        if app.custom_window_decorations() && !cfg!(target_arch = "wasm32") {
             #[cfg(not(target_arch = "wasm32"))]
             ui.native_window_buttons_ui();
             ui.separator();
@@ -406,7 +410,7 @@ fn panel_buttons_r2l(
                     "Time panel toggle",
                     &mut app_blueprint.time_panel_state().is_expanded(),
                 )
-                .on_hover_ui(|ui| UICommand::ToggleTimePanel.tooltip_ui(ui))
+                .on_hover_ui(|ui| re_ui::RecordingCommandKind::ToggleTimePanel.tooltip_ui(ui))
                 .clicked()
             {
                 app_blueprint.toggle_time_panel(&app.command_sender);
@@ -513,29 +517,6 @@ fn user_icon(email: &str, rect: Rect, ui: &egui::Ui, corner_radius: f32, tint: u
     );
 }
 
-/// Shows clickable website link as an image (text doesn't look as nice)
-fn website_link_ui(ui: &mut egui::Ui) {
-    let desired_height = ui.max_rect().height();
-    let desired_height = desired_height.at_most(20.0);
-
-    let image = re_ui::icons::RERUN_IO_TEXT
-        .as_image()
-        .fit_to_original_size(2.0) // hack, because the original SVG is very small
-        .max_height(desired_height)
-        .tint(ui.tokens().strong_fg_color);
-
-    let url = "https://rerun.io/";
-    let response = ui
-        .add(egui::Button::image(image))
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-    if response.clicked() {
-        ui.open_url(egui::output::OpenUrl {
-            url: url.to_owned(),
-            new_tab: true,
-        });
-    }
-}
-
 fn frame_time_label_ui(ui: &mut egui::Ui, app: &App) {
     if let Some(frame_time) = app.frame_time_history.average() {
         let ms = frame_time * 1e3;
@@ -588,7 +569,11 @@ fn fps_ui(ui: &mut egui::Ui, app: &App) {
     }
 }
 
-fn memory_use_label_ui(ui: &mut egui::Ui, gpu_resource_stats: &WgpuResourcePoolStatistics) {
+fn memory_use_label_ui(
+    ui: &mut egui::Ui,
+    gpu_resource_stats: &WgpuResourcePoolStatistics,
+    external_usage: &crate::external_memory::ExternalMemoryUsers,
+) {
     const CODE: &str = "use re_memory::AccountingAllocator;\n\
                         #[global_allocator]\n\
                         static GLOBAL: AccountingAllocator<std::alloc::System> =\n    \
@@ -620,22 +605,52 @@ fn memory_use_label_ui(ui: &mut egui::Ui, gpu_resource_stats: &WgpuResourcePoolS
 
     if let Some(count) = re_memory::accounting_allocator::global_allocs() {
         // we use monospace so the width doesn't fluctuate as the numbers change.
-
         let bytes_used_text = re_format::format_bytes(count.size as _);
+
         ui.label(
             egui::RichText::new(&bytes_used_text)
                 .monospace()
                 .color(ui.visuals().weak_text_color()),
         )
-        .on_hover_text(format!(
-            "Rerun Viewer is using {} of RAM in {} separate allocations,\n\
-            plus {} of GPU memory in {} textures and {} buffers.",
-            bytes_used_text,
-            format_uint(count.count),
-            re_format::format_bytes(gpu_resource_stats.total_bytes() as _),
-            format_uint(gpu_resource_stats.num_textures),
-            format_uint(gpu_resource_stats.num_buffers),
-        ));
+        .on_hover_ui(|ui| {
+            egui::Grid::new("memory usage hover")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    let global_mem = count.size;
+                    let external_mem = external_usage.total_external_memory();
+                    let viewer_mem = global_mem as u64 - external_mem;
+
+                    ui.label("Viewer");
+                    ui.monospace(re_format::format_bytes(viewer_mem as _));
+                    ui.end_row();
+
+                    if external_mem > 0 {
+                        ui.label("External");
+                        ui.monospace(re_format::format_bytes(external_mem as _));
+                        ui.end_row();
+                    }
+
+                    ui.label("Allocations");
+                    ui.monospace(format_uint(count.count));
+                    ui.end_row();
+
+                    ui.label("GPU");
+                    ui.monospace(re_format::format_bytes(
+                        gpu_resource_stats.total_bytes() as _
+                    ));
+                    ui.end_row();
+
+                    ui.label("GPU textures");
+                    ui.monospace(format_uint(gpu_resource_stats.num_textures));
+                    ui.end_row();
+
+                    ui.label("GPU buffers");
+                    ui.monospace(format_uint(gpu_resource_stats.num_buffers));
+                    ui.end_row();
+                });
+
+            ui.weak("See dev panel for more info");
+        });
     } else if let Some(rss) = mem.resident {
         let bytes_used_text = re_format::format_bytes(rss as _);
         click_to_copy(ui, &bytes_used_text, |ui| {
@@ -702,7 +717,7 @@ fn latency_details_ui(ui: &mut egui::Ui, latency: re_entity_db::LatencySnapshot)
 
     let e2e_hover_text = "End-to-end latency from when the data was logged by the SDK to when it is shown in the viewer.\n\
     This includes time for encoding, network latency, and decoding.\n\
-    It is also affected by the framerate of the viewer.\n\
+    It is also affected by the frame rate of the viewer.\n\
     This latency is inaccurate if the logging was done on a different machine, since it is clock-based.";
 
     let re_entity_db::LatencySnapshot { secs_since_log } = latency;

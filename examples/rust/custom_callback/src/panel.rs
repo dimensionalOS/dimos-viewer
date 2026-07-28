@@ -50,13 +50,17 @@ impl eframe::App for Control {
         // First add our panel(s):
         egui::Panel::right("Control Panel")
             .default_size(400.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ScrollArea::vertical().show(ui, |ui| {
                     self.ui(ui);
                 });
             });
 
         self.app.ui(ui, frame);
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.app.logic(ctx, frame);
     }
 }
 

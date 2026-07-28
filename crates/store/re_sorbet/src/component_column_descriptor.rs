@@ -1,11 +1,14 @@
 use arrow::datatypes::{DataType as ArrowDatatype, Field as ArrowField};
 use re_log_types::{ComponentPath, EntityPath};
-use re_types_core::{ArchetypeName, ComponentDescriptor, ComponentIdentifier, ComponentType};
+use re_types_core::{
+    ArchetypeName, ComponentDescriptor, ComponentIdentifier, ComponentType,
+    InvalidComponentIdentifierError,
+};
 
 use crate::{ArrowFieldMetadata, BatchType, ColumnKind, ComponentColumnSelector, MetadataExt as _};
 
 /// This is an [`ArrowField`] that contains specific meta-data.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, re_byte_size::SizeBytes)]
 pub struct ComponentColumnDescriptor {
     /// The Arrow datatype of the stored column.
     ///
@@ -64,27 +67,6 @@ pub struct ComponentColumnDescriptor {
     /// *IMPORTANT*: this is not always accurate, see [`crate::ChunkBatch::chunk_schema`].
     //TODO(#10315): fix this footgun
     pub is_semantically_empty: bool,
-}
-
-impl re_byte_size::SizeBytes for ComponentColumnDescriptor {
-    #[inline]
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            entity_path,
-            archetype,
-            component,
-            component_type,
-            store_datatype,
-            is_static: _,
-            is_tombstone: _,
-            is_semantically_empty: _,
-        } = self;
-        entity_path.heap_size_bytes()
-            + archetype.heap_size_bytes()
-            + component.heap_size_bytes()
-            + component_type.heap_size_bytes()
-            + store_datatype.heap_size_bytes()
-    }
 }
 
 impl PartialOrd for ComponentColumnDescriptor {
@@ -341,7 +323,10 @@ impl ComponentColumnDescriptor {
 impl ComponentColumnDescriptor {
     /// `chunk_entity_path`: if this column is part of a chunk batch,
     /// what is its entity path (so we can set [`ComponentColumnDescriptor::entity_path`])?
-    pub fn from_arrow_field(chunk_entity_path: Option<&EntityPath>, field: &ArrowField) -> Self {
+    pub fn from_arrow_field(
+        chunk_entity_path: Option<&EntityPath>,
+        field: &ArrowField,
+    ) -> Result<Self, InvalidComponentIdentifierError> {
         let entity_path =
             if let Some(entity_path) = field.get_opt(crate::metadata::SORBET_ENTITY_PATH) {
                 EntityPath::parse_forgiving(entity_path)
@@ -351,23 +336,24 @@ impl ComponentColumnDescriptor {
                 EntityPath::root() // NOTE: should be optional for general sorbet batches
             };
 
-        let component =
-            if let Some(component) = field.get_opt(re_types_core::FIELD_METADATA_KEY_COMPONENT) {
-                ComponentIdentifier::from(component)
-            } else {
-                ComponentIdentifier::new(field.name()) // fallback
-            };
+        // Prefer the `rerun:component` metadata, falling back to the field name.
+        // An empty `rerun:component` is treated as missing.
+        let component = field
+            .get_opt(re_types_core::FIELD_METADATA_KEY_COMPONENT)
+            .filter(|component| !component.is_empty())
+            .unwrap_or_else(|| field.name());
+        let component = ComponentIdentifier::try_new(component)?;
 
         let schema = Self {
             store_datatype: field.data_type().clone(),
             entity_path,
             archetype: field
                 .get_opt(re_types_core::FIELD_METADATA_KEY_ARCHETYPE)
-                .map(Into::into),
+                .and_then(|s| ArchetypeName::try_new(s).ok()),
             component,
             component_type: field
                 .get_opt(re_types_core::FIELD_METADATA_KEY_COMPONENT_TYPE)
-                .map(Into::into),
+                .and_then(|s| ComponentType::try_new(s).ok()),
             is_static: field.get_bool("rerun:is_static"),
             is_tombstone: field.get_bool("rerun:is_tombstone"),
             is_semantically_empty: field.get_bool("rerun:is_semantically_empty"),
@@ -375,6 +361,6 @@ impl ComponentColumnDescriptor {
 
         schema.sanity_check();
 
-        schema
+        Ok(schema)
     }
 }

@@ -24,7 +24,10 @@ async fn test_grid_view() {
 
     for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
         let mut test_context = TestContext::new();
-        test_context.app_options.experimental.table_grid_view = true;
+        test_context
+            .app_options
+            .experimental
+            .table_cards_and_blueprints = true;
         let runtime_handle =
             AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen().unwrap();
 
@@ -35,7 +38,12 @@ async fn test_grid_view() {
                 test_context.run_recording(&ui.ctx().clone(), |ctx| {
                     DataFusionTableWidget::new(Arc::clone(&session_context), table_ref)
                         .title("Grid view test")
-                        .show(ctx, &runtime_handle, ui);
+                        .show(
+                            ctx.app_ctx,
+                            &runtime_handle,
+                            ui,
+                            &mut test_context.view_states.lock(),
+                        );
                 });
             });
 
@@ -58,7 +66,10 @@ async fn test_grid_view_resize() {
 
     for (width, suffix) in [(400.0, "narrow"), (1200.0, "wide")] {
         let mut test_context = TestContext::new();
-        test_context.app_options.experimental.table_grid_view = true;
+        test_context
+            .app_options
+            .experimental
+            .table_cards_and_blueprints = true;
         let runtime_handle =
             AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen().unwrap();
 
@@ -68,7 +79,12 @@ async fn test_grid_view_resize() {
                 test_context.run_recording(&ui.ctx().clone(), |ctx| {
                     DataFusionTableWidget::new(Arc::clone(&session_context), table_ref)
                         .title("Grid resize test")
-                        .show(ctx, &runtime_handle, ui);
+                        .show(
+                            ctx.app_ctx,
+                            &runtime_handle,
+                            ui,
+                            &mut test_context.view_states.lock(),
+                        );
                 });
             });
 
@@ -101,7 +117,10 @@ async fn test_grid_view_flagging() {
 
     for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
         let mut test_context = TestContext::new();
-        test_context.app_options.experimental.table_grid_view = true;
+        test_context
+            .app_options
+            .experimental
+            .table_cards_and_blueprints = true;
         let runtime_handle =
             AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen().unwrap();
 
@@ -112,8 +131,13 @@ async fn test_grid_view_flagging() {
                 test_context.run_recording(&ui.ctx().clone(), |ctx| {
                     DataFusionTableWidget::new(Arc::clone(&session_context), table_ref)
                         .title("Flag test")
-                        .remote_table(remote_uri.clone())
-                        .show(ctx, &runtime_handle, ui);
+                        .url(remote_uri.to_string())
+                        .show(
+                            ctx.app_ctx,
+                            &runtime_handle,
+                            ui,
+                            &mut test_context.view_states.lock(),
+                        );
                 });
             });
 
@@ -139,12 +163,14 @@ async fn test_grid_view_flagging() {
 ///
 /// Creates 30 rows with varying content lengths — some with long multi-word notes
 /// that wrap, some with short or missing values — so cards end up at different heights.
-/// TODO(RR-4405): This looks bad right now.
 #[tokio::test(flavor = "multi_thread")] // `multi_thread` required because `ConnectionRegistryHandle::credentials` uses `block_in_place`.
 async fn test_grid_view_non_uniform_cards() {
     let (session_context, table_ref) = setup_non_uniform_table();
     let mut test_context = TestContext::new();
-    test_context.app_options.experimental.table_grid_view = true;
+    test_context
+        .app_options
+        .experimental
+        .table_cards_and_blueprints = true;
     let runtime_handle = AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen().unwrap();
 
     let mut harness = test_context
@@ -153,7 +179,12 @@ async fn test_grid_view_non_uniform_cards() {
             test_context.run_recording(&ui.ctx().clone(), |ctx| {
                 DataFusionTableWidget::new(Arc::clone(&session_context), table_ref)
                     .title("Non-uniform cards")
-                    .show(ctx, &runtime_handle, ui);
+                    .show(
+                        ctx.app_ctx,
+                        &runtime_handle,
+                        ui,
+                        &mut test_context.view_states.lock(),
+                    );
             });
         });
 

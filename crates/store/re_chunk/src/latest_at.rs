@@ -1,5 +1,4 @@
 use arrow::array::Array as _;
-use re_byte_size::SizeBytes;
 use re_log_types::{TimeInt, TimelineName};
 use re_types_core::ComponentIdentifier;
 
@@ -10,26 +9,25 @@ use crate::{Chunk, RowId, UnitChunkShared};
 /// A query at a given time, for a given timeline.
 ///
 /// Get the latest version of the data available at this time.
-#[derive(Clone, PartialEq, Eq, Hash)]
+///
+/// The timeline is `None` for a static-only query (see [`Self::new_static`]), where no timeline
+/// is relevant.
+#[derive(Clone, PartialEq, Eq, Hash, re_byte_size::SizeBytes)]
 pub struct LatestAtQuery {
-    timeline: TimelineName,
+    timeline: Option<TimelineName>,
+
+    /// The time being queried, or [`TimeInt::STATIC`] for a static-only query.
     at: TimeInt,
-}
-
-impl SizeBytes for LatestAtQuery {
-    fn heap_size_bytes(&self) -> u64 {
-        let Self { timeline, at } = self;
-
-        timeline.heap_size_bytes() + at.heap_size_bytes()
-    }
 }
 
 impl std::fmt::Debug for LatestAtQuery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "<latest-at {:?} on {:?}>",
-            self.at, self.timeline,
-        ))
+        match self.timeline {
+            Some(timeline) => {
+                f.write_fmt(format_args!("<latest-at {:?} on {:?}>", self.at, timeline))
+            }
+            None => f.write_fmt(format_args!("<latest-at {:?} (static)>", self.at)),
+        }
     }
 }
 
@@ -38,7 +36,7 @@ impl LatestAtQuery {
     #[inline]
     pub fn new(timeline: TimelineName, at: impl TryInto<TimeInt>) -> Self {
         Self {
-            timeline,
+            timeline: Some(timeline),
             at: TimeInt::saturated_temporal(at),
         }
     }
@@ -46,16 +44,27 @@ impl LatestAtQuery {
     #[inline]
     pub const fn latest(timeline: TimelineName) -> Self {
         Self {
-            timeline,
+            timeline: Some(timeline),
             at: TimeInt::MAX,
         }
     }
 
+    /// A query for static data only, where no timeline is relevant.
     #[inline]
-    pub fn timeline(&self) -> TimelineName {
+    pub const fn new_static() -> Self {
+        Self {
+            timeline: None,
+            at: TimeInt::STATIC,
+        }
+    }
+
+    /// The timeline being queried, or `None` for a static-only query.
+    #[inline]
+    pub fn timeline(&self) -> Option<TimelineName> {
         self.timeline
     }
 
+    /// The time being queried, or [`TimeInt::STATIC`] for a static-only query.
     #[inline]
     pub fn at(&self) -> TimeInt {
         self.at
@@ -95,7 +104,7 @@ impl Chunk {
         let mut index = None;
 
         let is_static = self.is_static();
-        let is_sorted_by_row_id = self.is_sorted();
+        let is_sorted_by_row_id = self.is_row_ids_sorted();
 
         if is_static {
             if is_sorted_by_row_id {
@@ -128,7 +137,7 @@ impl Chunk {
                 }
             }
         } else {
-            let time_column = self.timelines.get(&query.timeline())?;
+            let time_column = self.timelines.get(&query.timeline()?)?;
 
             let is_sorted_by_time = time_column.is_sorted();
             let times = time_column.times_raw();

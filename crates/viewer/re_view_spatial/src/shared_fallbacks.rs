@@ -52,6 +52,12 @@ pub fn register_fallbacks(system_registry: &mut re_viewer_context::ViewSystemReg
             .register_fallback_provider(component, |_ctx| components::Radius::new_ui_points(0.5));
     }
 
+    // VideoReference
+    system_registry.register_fallback_provider(
+        archetypes::VideoFrameReference::descriptor_video_reference().component,
+        |ctx| components::EntityPath::from(ctx.target_entity_path),
+    );
+
     // Pinhole
     system_registry.register_fallback_provider(
         archetypes::Pinhole::descriptor_image_plane_distance().component,
@@ -181,21 +187,26 @@ pub fn register_fallbacks(system_registry: &mut re_viewer_context::ViewSystemReg
                         None,
                     );
 
+                // Note: an empty coordinate frame is treated as invalid and falls through to the implicit frame.
                 if let Some(frame_id) = results.get_mono::<components::TransformFrameId>(
                     archetypes::CoordinateFrame::descriptor_frame().component,
-                ) {
+                ) && !frame_id.as_str().is_empty()
+                {
                     return frame_id;
                 }
             }
 
             'scope: {
+                // This path only works if `TransformTreeContext` already built the transform forest.
+                // Creating `TransformDatabaseStoreCache` here would initialize the frame id registry,
+                // but still wouldn't build a useful transform forest, so a non-creating read is enough.
                 let caches = ctx.store_ctx().caches;
-                let (frame_id_registry, transform_forest) =
-                    caches.memoizer(|c: &mut re_viewer_context::TransformDatabaseStoreCache| {
-                        (c.frame_id_registry(ctx.recording()), c.transform_forest())
-                    });
-
-                let Some(transform_forest) = transform_forest else {
+                let Some((frame_id_registry, transform_forest)) = caches
+                    .memoizer_read::<re_viewer_context::TransformDatabaseStoreCache, _>(|c| {
+                        Some((c.cached_frame_id_registry()?, c.transform_forest()?))
+                    })
+                    .flatten()
+                else {
                     break 'scope;
                 };
 
@@ -223,6 +234,8 @@ pub fn register_fallbacks(system_registry: &mut re_viewer_context::ViewSystemReg
                         .get_mono::<components::TransformFrameId>(
                             archetypes::CoordinateFrame::descriptor_frame().component,
                         )
+                        // Empty coordinate frames fall back to implicit frames in transform retrieval and therefore provide no explicit root candidate.
+                        .filter(|frame| !frame.as_str().is_empty())
                         .and_then(|frame| {
                             transform_forest
                                 .root_from_frame(re_tf::TransformFrameIdHash::new(&frame))

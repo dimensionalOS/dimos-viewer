@@ -18,6 +18,7 @@ use web_time::Instant;
 
 use super::{Time, Timescale};
 use crate::nalu::AnnexBStreamWriteError;
+use crate::player::GetVideoSource;
 use crate::{
     Chunk, StableIndexDeque, TrackId, TrackKind, write_avc_chunk_to_annexb,
     write_hevc_chunk_to_annexb,
@@ -348,14 +349,12 @@ impl VideoDataDescription {
     ///
     /// * H.264/H.265: MP4 stores samples using AVCC/HVCC length-prefixed NALs and relies on container
     ///   metadata for SPS/PPS/VPS. This method makes sure to unpack this.
-    /// * AV1 samples are stored as-is.
-    /// * VP8/VP9: Not yet supported
+    /// * AV1, VP8, and VP9 samples are stored as-is.
     pub fn sample_data_in_stream_format(
         &self,
         chunk: &crate::Chunk,
     ) -> Result<Vec<u8>, SampleConversionError> {
         match self.codec {
-            VideoCodec::AV1 | VideoCodec::ImageSequence(_) => Ok(chunk.data.clone()),
             VideoCodec::H264 => {
                 let stsd = self
                     .encoding_details
@@ -406,9 +405,8 @@ impl VideoDataDescription {
                     .map_err(SampleConversionError::AnnexB)?;
                 Ok(output)
             }
-            VideoCodec::VP8 | VideoCodec::VP9 => {
-                // TODO(#10186): Support VP8/VP9 for the `VideoStream` archetype
-                Err(SampleConversionError::UnsupportedCodec(self.codec.clone()))
+            VideoCodec::AV1 | VideoCodec::VP8 | VideoCodec::VP9 | VideoCodec::ImageSequence(_) => {
+                Ok(chunk.data.clone())
             }
         }
     }
@@ -428,9 +426,6 @@ pub enum SampleConversionError {
 
     #[error("Failed converting sample to Annex-B: {0}")]
     AnnexB(#[from] AnnexBStreamWriteError),
-
-    #[error("Unsupported codec {0:?}")]
-    UnsupportedCodec(VideoCodec),
 }
 
 /// Various information about how the video was encoded.
@@ -609,7 +604,6 @@ impl VideoDataDescription {
         data: &[u8],
         media_type: &str,
         debug_name: &str,
-        source_id: Tuid,
     ) -> Result<Self, VideoLoadError> {
         if data.is_empty() {
             return Err(VideoLoadError::ZeroBytes);
@@ -617,7 +611,7 @@ impl VideoDataDescription {
 
         re_tracing::profile_function!();
         match media_type {
-            "video/mp4" => Self::load_mp4(data, debug_name, source_id),
+            "video/mp4" => Self::load_mp4(data, debug_name),
 
             media_type => {
                 if media_type.starts_with("video/") {
@@ -637,9 +631,9 @@ impl VideoDataDescription {
     #[inline]
     pub fn human_readable_codec_string(&self) -> String {
         let base_codec_string = match &self.codec {
-            VideoCodec::AV1 => "AV1",
             VideoCodec::H264 => "H.264 AVC1",
             VideoCodec::H265 => "H.265 HEV1",
+            VideoCodec::AV1 => "AV1",
             VideoCodec::VP8 => "VP8",
             VideoCodec::VP9 => "VP9",
             VideoCodec::ImageSequence(_) => {
@@ -717,7 +711,7 @@ impl VideoDataDescription {
 
     /// `num_frames / duration`.
     ///
-    /// Note that the video could have a variable framerate!
+    /// Note that the video could have a variable frame rate!
     #[inline]
     pub fn average_fps(&self) -> Option<f32> {
         self.duration().map(|duration| {
@@ -727,6 +721,37 @@ impl VideoDataDescription {
             // so we don't have a fence-post problem here!
             num_frames as f32 / duration.as_secs_f32()
         })
+    }
+
+    /// Average bitrate in bits per second.
+    ///
+    /// Computed over the samples whose byte size is currently known (i.e. those with a
+    /// [`VideoSource::Span`] source). For a fully loaded video asset this is the bitrate of the
+    /// whole video; for a partially downloaded video it is the average bitrate over the portion
+    /// that has arrived so far.
+    ///
+    /// Returns `None` if no sample sizes are known (e.g. video streams whose bytes live in
+    /// external chunks) or if the covered duration is zero.
+    pub fn average_bitrate(&self) -> Option<f64> {
+        let timescale = self.timescale?;
+
+        let mut total_bytes: u64 = 0;
+        let mut total_secs = 0.0;
+        for state in self.samples.iter() {
+            let Some(sample) = state.sample() else {
+                continue;
+            };
+            let VideoSource::Span(span) = sample.source else {
+                continue;
+            };
+            let Some(duration) = sample.duration else {
+                continue;
+            };
+            total_bytes += span.len;
+            total_secs += duration.into_secs(timescale);
+        }
+
+        (total_secs > 0.0).then(|| total_bytes as f64 * 8.0 / total_secs)
     }
 
     /// Determines the video timestamps of all present frames inside a video, returning raw time values.
@@ -752,9 +777,11 @@ impl VideoDataDescription {
         samples: &StableIndexDeque<SampleMetadataState>,
         decode_time: Time,
     ) -> Option<SampleIndex> {
-        samples
+        let idx = samples
             .partition_point(|sample| sample.decode_timestamp() <= decode_time)
-            .checked_sub(1)
+            .checked_sub(1)?;
+
+        (idx >= samples.min_index()).then_some(idx)
     }
 
     /// See [`Self::latest_sample_index_at_presentation_timestamp`], split out for testing purposes.
@@ -790,7 +817,7 @@ impl VideoDataDescription {
             debug_assert!(sample_statistics.dts_always_equal_pts);
             return Ok(decode_sample_idx);
         };
-        debug_assert!(has_sample_highest_pts_so_far.len() == samples.next_index());
+        debug_assert!(has_sample_highest_pts_so_far.len() == samples.num_elements());
 
         // Search backwards, starting at `decode_sample_idx`, looking for
         // the first sample where `sample.presentation_timestamp <= presentation_timestamp`.
@@ -818,7 +845,9 @@ impl VideoDataDescription {
                 best_index = sample_idx;
             }
 
-            if best_pts != Time::MIN && has_sample_highest_pts_so_far[sample_idx] {
+            if best_pts != Time::MIN
+                && has_sample_highest_pts_so_far[sample_idx - samples.min_index()]
+            {
                 // We won't see any bigger PTS values anymore, meaning we're as close as we can get to the requested PTS!
                 return Ok(best_index);
             }
@@ -904,7 +933,7 @@ impl VideoDataDescription {
 /// The state of the current sample.
 ///
 /// When the source is loaded, all of its samples will be either `Present` or `Skip`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, re_byte_size::SizeBytes)]
 pub enum SampleMetadataState {
     /// Sample is present and contains video data.
     Present(SampleMetadata),
@@ -912,6 +941,8 @@ pub enum SampleMetadataState {
     /// The source for this sample hasn't arrived yet.
     ///
     /// `min_dts` is the minimum decode time of this unloaded sample.
+    /// `source_id` is the primary id of the container this sample is expected
+    /// to come from; the host can use it to keep that container alive.
     Unloaded { source_id: Tuid, min_dts: Time },
 }
 
@@ -930,17 +961,54 @@ impl SampleMetadataState {
         }
     }
 
-    pub fn source_id(&self) -> Tuid {
+    /// The full [`VideoSource`] descriptor for this sample.
+    ///
+    /// For unloaded samples we don't yet know the sub-id so it's lifted to an
+    /// `Id { sub_id: None }` form.
+    pub fn source(&self) -> VideoSource {
         match self {
-            Self::Present(sample) => sample.source_id,
-            Self::Unloaded { source_id, .. } => *source_id,
+            Self::Present(sample) => sample.source,
+            Self::Unloaded { source_id, .. } => VideoSource::Id {
+                id: *source_id,
+                sub_id: None,
+            },
         }
     }
 
-    pub fn source_id_mut(&mut self) -> &mut Tuid {
+    /// The primary id of the sample's source, if any.
+    ///
+    /// For unloaded samples this is the container id we expect the sample to
+    /// come from. For loaded samples it's whichever id is stored in
+    /// [`VideoSource::Id`]; `Span` sources don't have one (the host already
+    /// knows which buffer they refer to).
+    pub fn source_primary_id(&self) -> Option<Tuid> {
         match self {
-            Self::Present(sample) => &mut sample.source_id,
-            Self::Unloaded { source_id, .. } => source_id,
+            Self::Present(sample) => sample.source.primary_id(),
+            Self::Unloaded { source_id, .. } => Some(*source_id),
+        }
+    }
+
+    /// A [`VideoSource`] to pass to `get_video_chunk` purely to let the host
+    /// mark this sample's container as still in use, without asking for any
+    /// actual bytes.
+    ///
+    /// Returns `None` for [`VideoSource::Span`] sources, which have no
+    /// container the host could unload.
+    pub fn source_to_mark_in_use(&self) -> Option<VideoSource> {
+        self.source_primary_id()
+            .map(|id| VideoSource::Id { id, sub_id: None })
+    }
+
+    /// Reassign the primary id of this sample's source (e.g. after the host
+    /// renames or relocates the container). Sub-id is preserved.
+    /// No-op for `Span` sources, which don't have a primary id.
+    pub fn set_source_primary_id(&mut self, new_id: Tuid) {
+        match self {
+            Self::Present(sample) => match &mut sample.source {
+                VideoSource::Span(_) => {}
+                VideoSource::Id { id, .. } => *id = new_id,
+            },
+            Self::Unloaded { source_id, .. } => *source_id = new_id,
         }
     }
 
@@ -959,14 +1027,20 @@ impl SampleMetadataState {
         }
     }
 
-    pub fn unload(&mut self, new_source_id: Option<Tuid>) {
+    pub fn unload(&mut self, new_primary_id: Option<Tuid>) {
         match self {
             Self::Present(sample) => {
                 let dts = sample.decode_timestamp;
-                let source_id = new_source_id.unwrap_or(sample.source_id);
+                // Use whatever the caller provided, or the present sample's primary
+                // id if it has one. `Span` sources don't, so we fall back to
+                // `Tuid::ZERO` — those samples don't really have a meaningful
+                // unloaded form anyway.
+                let id = new_primary_id
+                    .or_else(|| sample.source.primary_id())
+                    .unwrap_or(Tuid::ZERO);
 
                 *self = Self::Unloaded {
-                    source_id,
+                    source_id: id,
                     min_dts: dts,
                 }
             }
@@ -974,8 +1048,8 @@ impl SampleMetadataState {
                 source_id,
                 min_dts: _,
             } => {
-                if let Some(new_source_id) = new_source_id {
-                    *source_id = new_source_id;
+                if let Some(new_id) = new_primary_id {
+                    *source_id = new_id;
                 }
             }
         }
@@ -990,18 +1064,6 @@ impl SampleMetadataState {
 
     pub fn is_unloaded(&self) -> bool {
         !self.is_loaded()
-    }
-}
-
-impl re_byte_size::SizeBytes for SampleMetadataState {
-    fn heap_size_bytes(&self) -> u64 {
-        match self {
-            Self::Present(sample_metadata) => sample_metadata.heap_size_bytes(),
-            Self::Unloaded {
-                source_id: _,
-                min_dts: _,
-            } => 0,
-        }
     }
 }
 
@@ -1020,7 +1082,63 @@ impl re_byte_size::SizeBytes for SampleMetadataState {
 /// see <https://en.wikipedia.org/wiki/Network_Abstraction_Layer#Access_Units/>:
 /// > A set of NAL units in a specified form is referred to as an access unit.
 /// > The decoding of each access unit results in one decoded picture.
-#[derive(Debug, Clone)]
+/// > Where a video sample's bytes live.
+///
+/// The interpretation is up to the caller of [`SampleMetadata::get`]: `re_video`
+/// itself only forwards the value to the user-supplied fetch callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, re_byte_size::SizeBytes)]
+pub enum VideoSource {
+    /// The bytes occupy this byte range within a single source buffer the user
+    /// already knows about. Used for e.g. mp4 assets.
+    Span(#[size_bytes(ignore)] /* pod without size bytes impl */ Span<u64>),
+
+    /// An identifier pair the host resolves to the sample's bytes.
+    ///
+    /// `id` identifies a container (e.g. a Rerun chunk for video streams),
+    /// `sub_id` selects the sample within. `sub_id == None` can be used if
+    /// the specific sample within the container is not known, for example
+    /// when the sample is unloaded.
+    Id { id: Tuid, sub_id: Option<Tuid> },
+}
+
+impl VideoSource {
+    /// Identify a specific item within a container.
+    #[inline]
+    pub fn id(id: Tuid, sub_id: Tuid) -> Self {
+        Self::Id {
+            id,
+            sub_id: Some(sub_id),
+        }
+    }
+
+    /// Returns the same source with the per-sample selector cleared.
+    ///
+    /// Useful when calling the player's `get_video_chunk` callback purely to
+    /// mark a container as still in-use, without asking for any specific sample.
+    ///
+    /// `Span` sources are returned unchanged.
+    #[inline]
+    pub fn only_source(self) -> Self {
+        match self {
+            Self::Span(_) => self,
+            Self::Id { id, .. } => Self::Id { id, sub_id: None },
+        }
+    }
+
+    /// The primary id of this source, if any.
+    ///
+    /// `Span`-style sources have no primary id (the host already knows which
+    /// buffer they refer to).
+    #[inline]
+    pub fn primary_id(&self) -> Option<Tuid> {
+        match self {
+            Self::Span(_) => None,
+            Self::Id { id, .. } => Some(*id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, re_byte_size::SizeBytes)]
 pub struct SampleMetadata {
     /// Is this the start of a new (closed) group of pictures?
     ///
@@ -1059,21 +1177,11 @@ pub struct SampleMetadata {
     /// May be unknown if this is the last sample in an ongoing video stream.
     pub duration: Option<Time>,
 
-    /// The Rerun chunk this sample comes from.
-    pub source_id: Tuid,
-
-    /// Offset and length within a data buffer indicated by [`SampleMetadata::source_id`].
-    pub byte_span: Span<u32>,
-}
-
-impl re_byte_size::SizeBytes for SampleMetadata {
-    fn heap_size_bytes(&self) -> u64 {
-        0
-    }
-
-    fn is_pod() -> bool {
-        true
-    }
+    /// Where to fetch the sample's bytes from.
+    ///
+    /// The player's `get_video_chunk` callback receives this value and is
+    /// expected to return a slice containing exactly the sample's bytes.
+    pub source: VideoSource,
 }
 
 impl SampleMetadata {
@@ -1086,16 +1194,15 @@ impl SampleMetadata {
     ///
     /// Returns `None` if the sample is out of bounds, which can only happen
     /// if `data` is not the original video data.
-    pub fn get<'a>(
-        &self,
-        get_buffer: &dyn Fn(Tuid) -> &'a [u8],
-        sample_idx: SampleIndex,
-    ) -> Option<Chunk> {
-        let buffer = get_buffer(self.source_id);
-        let data = buffer.get(self.byte_span.range_usize())?.to_vec();
+    pub fn get(&self, video_source: &dyn GetVideoSource, sample_idx: SampleIndex) -> Option<Chunk> {
+        let bytes = video_source.get_video_chunk(self.source);
+
+        if bytes.is_empty() {
+            return None;
+        }
 
         Some(Chunk {
-            data,
+            data: bytes.to_vec(),
             sample_idx,
             frame_nr: self.frame_nr,
             decode_timestamp: self.decode_timestamp,
@@ -1107,13 +1214,25 @@ impl SampleMetadata {
 }
 
 /// Errors that can occur when loading a video.
-#[derive(thiserror::Error, Debug)]
+// Close enough.
+#[derive(thiserror::Error, Debug, re_byte_size::SizeBytes)]
 pub enum VideoLoadError {
     #[error("The video file is empty (zero bytes)")]
     ZeroBytes,
 
     #[error("MP4 error: {0}")]
-    ParseMp4(#[from] re_mp4::Error),
+    ParseMp4(
+        #[from]
+        #[size_bytes(ignore)]
+        re_mp4::Error,
+    ),
+
+    #[error("I/O error: {0}")]
+    Io(
+        #[from]
+        #[size_bytes(ignore)]
+        std::io::Error,
+    ),
 
     #[error("Video file has no video tracks")]
     NoVideoTrack,
@@ -1131,11 +1250,13 @@ pub enum VideoLoadError {
 
     #[error("The media type of the blob is not a video: {provided_or_detected_media_type}")]
     MimeTypeIsNotAVideo {
+        #[size_bytes(ignore)]
         provided_or_detected_media_type: String,
     },
 
     #[error("MIME type '{provided_or_detected_media_type}' is not supported for videos")]
     UnsupportedMimeType {
+        #[size_bytes(ignore)]
         provided_or_detected_media_type: String,
     },
 
@@ -1145,19 +1266,13 @@ pub enum VideoLoadError {
 
     // `FourCC`'s debug impl doesn't quote the result
     #[error("Video track uses unsupported codec \"{0}\"")] // NOLINT
-    UnsupportedCodec(re_mp4::FourCC),
+    UnsupportedCodec(#[size_bytes(ignore)] re_mp4::FourCC),
 
     #[error("Unable to determine codec string from the video contents")]
     UnableToDetermineCodecString,
 
     #[error("Failed to parse H.264 SPS from mp4: {0:?}")]
-    SpsParsingError(h264_reader::nal::sps::SpsError),
-}
-
-impl re_byte_size::SizeBytes for VideoLoadError {
-    fn heap_size_bytes(&self) -> u64 {
-        0 // close enough
-    }
+    SpsParsingError(#[size_bytes(ignore)] h264_reader::nal::sps::SpsError),
 }
 
 impl std::fmt::Debug for VideoDataDescription {
@@ -1188,7 +1303,7 @@ impl std::fmt::Debug for VideoDataDescription {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nalu::ANNEXB_NAL_START_CODE;
+    use crate::{nalu::ANNEXB_NAL_START_CODE, player::VideoSliceSource};
 
     #[test]
     fn test_latest_sample_index_at_presentation_timestamp() {
@@ -1208,12 +1323,10 @@ mod tests {
 
         // Checking our basic assumptions about this data:
         assert_eq!(pts.len(), dts.len());
-        assert!(pts.iter().zip(dts.iter()).all(|(pts, dts)| dts <= pts));
+        assert!(std::iter::zip(&pts, &dts).all(|(pts, dts)| dts <= pts));
 
         // Create fake samples from this.
-        let mut samples = pts
-            .into_iter()
-            .zip(dts)
+        let mut samples = std::iter::zip(pts, dts)
             .map(|(pts, dts)| {
                 SampleMetadataState::Present(SampleMetadata {
                     is_sync: true,
@@ -1221,8 +1334,7 @@ mod tests {
                     decode_timestamp: Time(dts),
                     presentation_timestamp: Time(pts),
                     duration: Some(Time(1)),
-                    source_id: Tuid::new(),
-                    byte_span: Default::default(),
+                    source: VideoSource::Span(Default::default()),
                 })
             })
             .collect::<StableIndexDeque<_>>();
@@ -1315,22 +1427,24 @@ mod tests {
         data.windows(4).any(|w| w == ANNEXB_NAL_START_CODE)
     }
 
-    fn video_test_file_mp4(codec: &VideoCodec, need_dts_equal_pts: bool) -> std::path::PathBuf {
-        let workspace_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    fn workspace_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|p| p.parent())
             .and_then(|p| p.parent())
             .unwrap()
-            .to_path_buf();
+            .to_path_buf()
+    }
+
+    fn video_test_file_mp4(codec: &VideoCodec, need_dts_equal_pts: bool) -> std::path::PathBuf {
+        let workspace_dir = workspace_dir();
 
         let codec_str = match codec {
             VideoCodec::H264 => "h264",
             VideoCodec::H265 => "h265",
-            VideoCodec::VP9 => "vp9",
-            VideoCodec::VP8 => {
-                panic!("We don't have test data for vp8, because Mp4 doesn't support vp8.")
-            }
             VideoCodec::AV1 => "av1",
+            VideoCodec::VP8 => "vp8",
+            VideoCodec::VP9 => "vp9",
             VideoCodec::ImageSequence(_) => panic!("mp4 won't be an image sequence"),
         };
 
@@ -1354,7 +1468,6 @@ mod tests {
             &data,
             "video/mp4",
             &format!("test_{codec:?}_video_sampling"),
-            Tuid::new(),
         )
         .unwrap();
 
@@ -1365,7 +1478,7 @@ mod tests {
             let chunk = sample
                 .sample()
                 .unwrap()
-                .get(&|_| &data, sample_idx)
+                .get(&VideoSliceSource(&data), sample_idx)
                 .unwrap();
             let converted = video_data.sample_data_in_stream_format(&chunk).unwrap();
 
@@ -1398,9 +1511,30 @@ mod tests {
 
     #[test]
     fn test_full_video_sampling_all_codecs() {
-        // TODO(#10186): Add VP9 once we have it.
-        for codec in [VideoCodec::H264, VideoCodec::H265, VideoCodec::AV1] {
+        for codec in [
+            VideoCodec::H264,
+            VideoCodec::H265,
+            VideoCodec::AV1,
+            VideoCodec::VP8,
+            VideoCodec::VP9,
+        ] {
             test_video_codec_sampling(&codec, false);
+        }
+    }
+
+    #[test]
+    fn test_unsupported_codec_reports_codec_not_missing_track() {
+        // A video file whose track uses a codec we don't support, such as MPEG-4 Part 2,
+        // should report the unsupported codec rather than claim the file has no video track.
+        let data =
+            std::fs::read(workspace_dir().join("tests/assets/video/mpeg4_part2.mp4")).unwrap();
+
+        match VideoDataDescription::load_from_bytes(&data, "video/mp4", "mpeg4_part2") {
+            Err(VideoLoadError::UnsupportedCodec(fourcc)) => {
+                assert_eq!(fourcc, re_mp4::FourCC::from(*b"mp4v"));
+            }
+            Err(other) => panic!("expected UnsupportedCodec, got {other:?}"),
+            Ok(_) => panic!("expected loading MPEG-4 Part 2 to fail"),
         }
     }
 
@@ -1411,8 +1545,7 @@ mod tests {
             decode_timestamp: Time(dts),
             presentation_timestamp: Time(dts),
             duration: Some(Time(1)),
-            source_id: Tuid::new(),
-            byte_span: Default::default(),
+            source: VideoSource::Span(Default::default()),
         })
     }
 

@@ -3,8 +3,10 @@
 
 use std::{
     collections::BinaryHeap,
-    ops::{Deref, DerefMut, RangeInclusive},
+    ops::{Deref, DerefMut},
 };
+
+use core::range::RangeInclusive;
 
 use ahash::{HashMap, HashSet};
 use re_chunk::{ChunkId, TimeInt};
@@ -13,7 +15,7 @@ use re_tracing::profile_function;
 
 use super::chunk_prioritizer::ComponentPathKey;
 
-#[derive(Clone)]
+#[derive(Clone, re_byte_size::SizeBytes)]
 pub struct TimeRange {
     range: AbsoluteTimeRange,
     depends_on: HashSet<ChunkId>,
@@ -25,22 +27,6 @@ impl TimeRange {
             range,
             depends_on: std::iter::once(chunk).collect(),
         }
-    }
-}
-
-impl re_byte_size::SizeBytes for TimeRange {
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            range: _,
-            depends_on,
-        } = self;
-
-        depends_on.heap_size_bytes()
-    }
-
-    #[inline]
-    fn is_pod() -> bool {
-        true
     }
 }
 
@@ -255,7 +241,7 @@ impl Ranges {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, re_byte_size::SizeBytes)]
 struct ResolvedRange {
     /// The end time of the range. The start time is defined by the
     /// end time of the prior range in the list or `MergedRanges.start_time`.
@@ -269,23 +255,8 @@ struct ResolvedRange {
     unloaded_count: Option<usize>,
 }
 
-impl re_byte_size::SizeBytes for ResolvedRange {
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            end_time: _,
-            unloaded_count: _,
-        } = self;
-
-        0
-    }
-
-    fn is_pod() -> bool {
-        true
-    }
-}
-
 /// Stores time ranges that keep track if they're loaded or unloaded.
-#[derive(Clone)]
+#[derive(Clone, re_byte_size::SizeBytes)]
 pub struct MergedRanges {
     start_time: TimeInt,
     ranges: Vec<ResolvedRange>,
@@ -293,21 +264,6 @@ pub struct MergedRanges {
 
     /// The components of interest this is cached for.
     components_of_interest: HashSet<ComponentPathKey>,
-}
-
-impl re_byte_size::SizeBytes for MergedRanges {
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            start_time: _,
-            ranges,
-            ranges_from_chunk,
-            components_of_interest,
-        } = self;
-
-        ranges.heap_size_bytes()
-            + ranges_from_chunk.heap_size_bytes()
-            + components_of_interest.heap_size_bytes()
-    }
 }
 
 impl MergedRanges {
@@ -329,8 +285,11 @@ impl MergedRanges {
                 for chunk in range.depends_on {
                     ranges_from_chunk
                         .entry(chunk)
-                        .and_modify(|range| *range = *range.start()..=idx)
-                        .or_insert(idx..=idx);
+                        .and_modify(|range| range.last = idx)
+                        .or_insert(RangeInclusive {
+                            start: idx,
+                            last: idx,
+                        });
                 }
                 start_time = start_time.min(range.range.min);
                 ResolvedRange {
@@ -393,7 +352,7 @@ impl MergedRanges {
             }
 
             let is_unloaded = is_unloaded(*chunk);
-            for idx in range.clone() {
+            for idx in *range {
                 let unloaded_count = self.ranges[idx].unloaded_count.get_or_insert(0);
 
                 if is_unloaded {
@@ -452,7 +411,7 @@ impl MergedRanges {
             return;
         };
 
-        for idx in range.clone() {
+        for idx in *range {
             let Some(unloaded_count) = &mut self.ranges[idx].unloaded_count else {
                 continue;
             };
@@ -474,7 +433,7 @@ impl MergedRanges {
             return;
         };
 
-        for idx in range.clone() {
+        for idx in *range {
             let Some(unloaded_count) = &mut self.ranges[idx].unloaded_count else {
                 continue;
             };
@@ -534,7 +493,7 @@ mod tests {
         );
 
         for (i, (range, (exp_min, exp_max, exp_chunks))) in
-            result.iter().zip(expected.iter()).enumerate()
+            std::iter::zip(result, expected).enumerate()
         {
             assert_eq!(range.min.as_i64(), *exp_min, "Range {i} min mismatch");
             assert_eq!(range.max.as_i64(), *exp_max, "Range {i} max mismatch");

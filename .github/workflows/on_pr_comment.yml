@@ -33,7 +33,7 @@ jobs:
       command: ${{ steps.parse.outputs.command }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Parse comment
         id: parse
@@ -55,7 +55,7 @@ jobs:
             -f content=eyes
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Dispatch main workflow
         id: dispatch
@@ -120,7 +120,7 @@ jobs:
 
       - name: Create PR comment
         # https://github.com/mshick/add-pr-comment
-        uses: mshick/add-pr-comment@v2.8.2
+        uses: mshick/add-pr-comment@v3.9.1
         with:
           # We use `GITHUB_TOKEN` here so there is no chance that we'll trigger another run of this workflow.
           # https://docs.github.com/en/actions/using-workflows/triggering-a-workflow#triggering-a-workflow-from-a-workflow

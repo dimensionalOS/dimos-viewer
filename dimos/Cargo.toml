@@ -1,8 +1,8 @@
 [package]
 name = "dimos-viewer"
-version = "0.32.0-alpha.2"
+version = "0.35.0-alpha.1"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 publish = false
 description = "DimOS Interactive Viewer — custom Rerun viewer with LCM click-to-navigate"

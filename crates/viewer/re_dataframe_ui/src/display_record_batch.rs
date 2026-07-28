@@ -9,6 +9,7 @@ use arrow::array::{
 };
 use arrow::buffer::{NullBuffer as ArrowNullBuffer, ScalarBuffer as ArrowScalarBuffer};
 use arrow::datatypes::DataType as ArrowDataType;
+use itertools::Itertools as _;
 use re_arrow_util::ArrowArrayDowncastRef as _;
 use re_component_ui::REDAP_THUMBNAIL_VARIANT;
 use re_dataframe::external::re_chunk::{TimeColumn, TimeColumnError};
@@ -19,7 +20,7 @@ use re_sdk_types::components::{Blob, MediaType};
 use re_sorbet::ColumnDescriptorRef;
 use re_types_core::{Component as _, DeserializationError, Loggable as _, RowId};
 use re_ui::UiExt as _;
-use re_viewer_context::{StoreViewContext, UiLayout, VariantName};
+use re_viewer_context::{AppContext, UiLayout, VariantName};
 
 use crate::table_blueprint::ColumnBlueprint;
 
@@ -215,10 +216,11 @@ impl DisplayComponentColumn {
 
     fn data_ui(
         &self,
-        ctx: &StoreViewContext<'_>,
+        ctx: &AppContext<'_>,
         ui: &mut egui::Ui,
         row_index: usize,
         instance_index: Option<u64>,
+        ui_layout: UiLayout,
     ) {
         // handle null columns
         if self.component_data.is_null() {
@@ -253,7 +255,7 @@ impl DisplayComponentColumn {
             if let Some(blob) = blob.as_ref().and_then(|b| b.first())
                 && Self::is_blob_image(blob)
             {
-                variant_name = Some(VariantName::from(REDAP_THUMBNAIL_VARIANT));
+                variant_name = Some(VariantName::from_static_str(REDAP_THUMBNAIL_VARIANT));
 
                 // TODO(ab): we should find an alternative to using content-hashing to generate cache
                 // keys.
@@ -275,20 +277,20 @@ impl DisplayComponentColumn {
             }
 
             if let Some(variant_name) = variant_name {
-                ctx.component_ui_registry().variant_ui_raw(
+                ctx.component_ui_registry.variant_ui_raw(
                     ctx,
                     ui,
-                    UiLayout::List,
+                    ui_layout,
                     variant_name,
                     &self.component_descr,
                     row_id,
                     data_to_display.as_ref(),
                 );
             } else {
-                ctx.component_ui_registry().component_ui_raw(
+                ctx.component_ui_registry.component_ui_raw(
                     ctx,
                     ui,
-                    UiLayout::List,
+                    ui_layout,
                     &self.entity_path,
                     &self.component_descr,
                     row_id,
@@ -372,10 +374,11 @@ impl DisplayColumn {
     ///   [`Self::instance_count`]), nothing is displayed.
     pub fn data_ui(
         &self,
-        ctx: &StoreViewContext<'_>,
+        ctx: &AppContext<'_>,
         ui: &mut egui::Ui,
         row_index: usize,
         instance_index: Option<u64>,
+        ui_layout: UiLayout,
     ) {
         if let Some(instance_index) = instance_index
             && instance_index >= self.instance_count(row_index)
@@ -413,7 +416,7 @@ impl DisplayColumn {
                             ui.label(
                                 timeline
                                     .typ()
-                                    .format(timestamp, ctx.app_options().timestamp_format),
+                                    .format(timestamp, ctx.app_options.timestamp_format),
                             );
                         }
                         Err(err) => {
@@ -426,7 +429,7 @@ impl DisplayColumn {
             }
 
             Self::Component(component_column) => {
-                component_column.data_ui(ctx, ui, row_index, instance_index);
+                component_column.data_ui(ctx, ui, row_index, instance_index, ui_layout);
             }
         }
     }
@@ -462,7 +465,7 @@ impl DisplayRecordBatch {
         let mut num_rows = None;
         let mut batch_row_ids = None;
 
-        let mut columns = data
+        let mut columns: Vec<DisplayColumn> = data
             .map(|(column_descriptor, column_blueprint, column_data)| {
                 if num_rows.is_none() {
                     num_rows = Some(column_data.len());
@@ -480,7 +483,7 @@ impl DisplayRecordBatch {
 
                 column
             })
-            .collect::<Result<Vec<DisplayColumn>, _>>()?;
+            .try_collect()?;
 
         // If we have row_ids, give a reference to all component columns.
         if let Some(batch_row_ids) = batch_row_ids {

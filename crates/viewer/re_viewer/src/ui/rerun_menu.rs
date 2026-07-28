@@ -2,12 +2,14 @@
 
 use std::fmt::Write as _;
 
+use egui::ScrollArea;
 #[cfg(debug_assertions)]
 use egui::containers::menu;
 use egui::containers::menu::{MenuButton, MenuConfig};
-use egui::{Button, NumExt as _, ScrollArea};
 use re_ui::menu::menu_style;
-use re_ui::{UICommand, UICommandSender as _, UiExt as _};
+use re_ui::{
+    RecordingCommand, RecordingCommandKind, UICommand, UICommandSender as _, UiExt as _, icons,
+};
 use re_viewer_context::ActiveStoreContext;
 
 use crate::App;
@@ -21,23 +23,14 @@ impl App {
         _store_context: Option<&ActiveStoreContext<'_>>,
         ui: &mut egui::Ui,
     ) {
-        let desired_icon_height = if ui.max_rect().height() <= 24.0 {
-            // This is a bit of a hack to produce a sharp logo on mac on low-DPI screens.
-            // At a 16x16 size, the Rerun logo SVG just happens to have all its vertical
-            // lines at even pixel positions, making it look sharp and nice.
-            16.0
-        } else {
-            ui.max_rect().height() - 4.0
-        };
-        let desired_icon_height = desired_icon_height.at_most(28.0);
-
-        let image = re_ui::icons::RERUN_MENU
+        let icon_tint = ui.tokens().strong_fg_color;
+        let image = re_ui::icons::RERUN_WORDMARK
             .as_image()
-            .max_height(desired_icon_height)
-            .tint(ui.tokens().strong_fg_color)
+            .max_height(12.0)
+            .tint(icon_tint)
             .alt_text("Menu");
 
-        MenuButton::from_button(Button::image(image))
+        MenuButton::new((image, icons::DROPDOWN_ARROW.as_image().tint(icon_tint)))
             .config(MenuConfig::new().style(menu_style()))
             .ui(ui, |ui| {
                 ui.set_max_height(ui.content_rect().height());
@@ -85,12 +78,17 @@ impl App {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         // no wrapping: make as wide as needed
 
-        ui.menu_button("About", |ui| self.about_rerun_ui(ui, render_state));
+        let build_info = self.build_info();
+        ui.menu_button("About", |ui| {
+            about_rerun_ui(ui, build_info, render_state);
+        });
 
         ui.add_space(SPACING);
 
-        UICommand::Undo.menu_button_ui(ui, &self.command_sender); // TODO(emilk): only enabled if there is something to undo
-        UICommand::Redo.menu_button_ui(ui, &self.command_sender); // TODO(emilk): only enabled if there is something to redo
+        let recording_id = _store_context.map(|ctx| ctx.recording_store_id());
+
+        RecordingCommandKind::Undo.menu_button_ui(ui, recording_id, &self.command_sender); // TODO(emilk): only enabled if there is something to undo
+        RecordingCommandKind::Redo.menu_button_ui(ui, recording_id, &self.command_sender); // TODO(emilk): only enabled if there is something to redo
 
         UICommand::ToggleCommandPalette.menu_button_ui(ui, &self.command_sender);
 
@@ -103,12 +101,8 @@ impl App {
 
         self.save_buttons_ui(ui, _store_context);
 
-        UICommand::SaveBlueprint.menu_button_ui(ui, &self.command_sender);
-
-        let has_recording = _store_context.is_some();
-        ui.add_enabled_ui(has_recording, |ui| {
-            UICommand::CloseCurrentRecording.menu_button_ui(ui, &self.command_sender);
-        });
+        RecordingCommandKind::SaveBlueprint.menu_button_ui(ui, recording_id, &self.command_sender);
+        RecordingCommandKind::Close.menu_button_ui(ui, recording_id, &self.command_sender);
 
         ui.add_space(SPACING);
 
@@ -139,8 +133,12 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             UICommand::OpenProfiler.menu_button_ui(ui, &self.command_sender);
 
-            UICommand::ToggleMemoryPanel.menu_button_ui(ui, &self.command_sender);
-            UICommand::ToggleChunkStoreBrowser.menu_button_ui(ui, &self.command_sender);
+            UICommand::ToggleDevPanel.menu_button_ui(ui, &self.command_sender);
+            RecordingCommandKind::ToggleChunkStoreBrowser.menu_button_ui(
+                ui,
+                recording_id,
+                &self.command_sender,
+            );
 
             #[cfg(debug_assertions)]
             UICommand::ToggleEguiDebugPanel.menu_button_ui(ui, &self.command_sender);
@@ -162,7 +160,12 @@ impl App {
             )
             .ui(ui, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                debug_menu_options_ui(ui, &mut self.state.app_options, &self.command_sender);
+                debug_menu_options_ui(
+                    ui,
+                    &mut self.state.app_options,
+                    recording_id,
+                    &self.command_sender,
+                );
 
                 ui.label("egui debug options:");
                 ui.weak(format!("pixels_per_point: {:?}", ui.pixels_per_point()));
@@ -171,6 +174,7 @@ impl App {
 
         ui.add_space(SPACING);
 
+        UICommand::OpenWebsite.menu_button_ui(ui, &self.command_sender);
         UICommand::OpenWebHelp.menu_button_ui(ui, &self.command_sender);
         UICommand::OpenRerunDiscord.menu_button_ui(ui, &self.command_sender);
 
@@ -181,68 +185,13 @@ impl App {
         }
     }
 
-    fn about_rerun_ui(&self, ui: &mut egui::Ui, render_state: Option<&egui_wgpu::RenderState>) {
-        let re_build_info::BuildInfo {
-            crate_name,
-            features,
-            version,
-            rustc_version,
-            llvm_version,
-            git_hash,
-            git_branch: _,
-            is_in_rerun_workspace: _,
-            target_triple,
-            datetime,
-            is_debug_build,
-        } = self.build_info();
-
-        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-
-        let git_hash_suffix = if git_hash.is_empty() {
-            String::new()
-        } else {
-            let short_git_hash = &git_hash[..std::cmp::min(git_hash.len(), 7)];
-            format!("({short_git_hash})")
-        };
-
-        let debug_label = if *is_debug_build { " (debug)" } else { "" };
-
-        let mut label = format!(
-            "{crate_name} {version} {git_hash_suffix}{debug_label}\n\
-            {target_triple}"
-        );
-
-        // It is really the features of `rerun-cli` (the `rerun` binary) that are interesting.
-        // For the web-viewer we get `crate_name: "re_viewer"` here, which is much less interesting.
-        if crate_name == "rerun-cli" && !features.is_empty() {
-            write!(label, "\n{crate_name} features: {features}").ok();
-        }
-
-        if !rustc_version.is_empty() {
-            write!(label, "\nrustc {rustc_version}").ok();
-            if !llvm_version.is_empty() {
-                write!(label, ", LLVM {llvm_version}").ok();
-            }
-        }
-
-        if !datetime.is_empty() {
-            write!(label, "\nbuilt {datetime}").ok();
-        }
-
-        ui.label(label);
-
-        if let Some(render_state) = render_state {
-            render_state_ui(ui, render_state);
-        }
-    }
-
     fn save_buttons_ui(&self, ui: &mut egui::Ui, store_ctx: Option<&ActiveStoreContext<'_>>) {
-        use re_ui::UICommandSender as _;
+        use re_ui::RecordingCommandSender as _;
 
         let file_save_in_progress = self.background_tasks.is_file_save_in_progress();
 
-        let save_recording_button = UICommand::SaveRecording.menu_button(ui.ctx());
-        let save_selection_button = UICommand::SaveRecordingSelection.menu_button(ui.ctx());
+        let save_recording_button = RecordingCommandKind::Save.menu_button(ui.ctx());
+        let save_selection_button = RecordingCommandKind::SaveTimeSelection.menu_button(ui.ctx());
 
         if file_save_in_progress {
             ui.add_enabled_ui(false, |ui| {
@@ -256,23 +205,29 @@ impl App {
                 });
             });
         } else {
-            let entity_db_is_nonempty =
-                store_ctx.is_some_and(|ctx| 0 < ctx.recording.num_physical_chunks());
-            ui.add_enabled_ui(entity_db_is_nonempty, |ui| {
+            let recording_id = store_ctx
+                .filter(|ctx| 0 < ctx.recording.num_physical_chunks())
+                .map(|ctx| ctx.recording.store_id());
+            ui.add_enabled_ui(recording_id.is_some(), |ui| {
                 if ui
                     .add(save_recording_button)
                     .on_hover_text("Save all data to a Rerun data file (.rrd)")
                     .clicked()
+                    && let Some(recording_id) = recording_id
                 {
                     ui.close();
-                    self.command_sender.send_ui(UICommand::SaveRecording);
+                    self.command_sender
+                        .send_recording_command(RecordingCommand {
+                            recording_id: recording_id.clone(),
+                            kind: RecordingCommandKind::Save,
+                        });
                 }
 
                 // We need to know the loop selection _before_ we can even display the
                 // button, as this will determine whether its grayed out or not!
                 // TODO(cmc): In practice the loop (green) selection is always there
                 // at the moment so…
-                let loop_selection = self.state.loop_selection(store_ctx);
+                let loop_selection = store_ctx.and_then(|ctx| ctx.loop_selection());
 
                 if ui
                     .add_enabled(loop_selection.is_some(), save_selection_button)
@@ -280,13 +235,131 @@ impl App {
                         "Save data for the current loop selection to a Rerun data file (.rrd)",
                     )
                     .clicked()
+                    && let Some(recording_id) = recording_id
                 {
                     ui.close();
                     self.command_sender
-                        .send_ui(UICommand::SaveRecordingSelection);
+                        .send_recording_command(RecordingCommand {
+                            recording_id: recording_id.clone(),
+                            kind: RecordingCommandKind::SaveTimeSelection,
+                        });
                 }
             });
         }
+    }
+}
+
+/// The about-menu serves two purposes:
+///
+/// A) Tell users about what Rerun is, in case they just stumbled upon it online.
+/// B) Show detailed build information, that can be used when reporting bugs.
+pub fn about_rerun_ui(
+    ui: &mut egui::Ui,
+    build_info: &re_build_info::BuildInfo,
+    render_state: Option<&egui_wgpu::RenderState>,
+) {
+    let re_build_info::BuildInfo {
+        crate_name,
+        features,
+        version,
+        rustc_version,
+        llvm_version,
+        git_hash,
+        git_branch: _,
+        is_in_rerun_workspace: _,
+        target_triple,
+        datetime,
+        is_debug_build,
+    } = build_info;
+
+    ui.set_max_width(400.0);
+
+    let logo_size = 68.0;
+
+    ui.horizontal(|ui|{
+        ui.add(
+            re_ui::icons::RERUN_LOGO
+                .as_image()
+                .fit_to_exact_size(egui::Vec2::splat(logo_size))
+                .corner_radius(4.0)
+                .alt_text("Rerun"),
+        );
+
+        ui.vertical(|ui|{
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            ui.label(
+                "Rerun is a toolchain for robotics and physical AI that makes it easy to log, query, visualize, and train on multi-rate, multimodal data.",
+            );
+
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.label("Learn more at ");
+                ui.hyperlink_to("rerun.io", "https://rerun.io/");
+                ui.label(".");
+            });
+        });
+    });
+
+    ui.add_space(SPACING);
+
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+    let version = {
+        let git_hash_suffix = if git_hash.is_empty() {
+            String::new()
+        } else {
+            let short_git_hash = &git_hash[..std::cmp::min(git_hash.len(), 7)];
+            format!(" ({short_git_hash})")
+        };
+
+        let debug_label = if *is_debug_build { " (debug)" } else { "" };
+
+        format!("{version}{git_hash_suffix}{debug_label}")
+    };
+
+    egui::Grid::new("build_info").num_columns(2).show(ui, |ui| {
+        ui.label("Crate");
+        ui.label(crate_name.as_ref());
+        ui.end_row();
+
+        ui.label("Version");
+        ui.label(version);
+        ui.end_row();
+
+        if !datetime.is_empty() {
+            ui.label("Built");
+            ui.label(datetime.as_ref());
+            ui.end_row();
+        }
+
+        // It is really the features of `rerun-cli` (the `rerun` binary) that are interesting.
+        // For the web-viewer (`crate_name: "re_viewer"`) it is much less interesting.
+        if crate_name == "rerun-cli" && !features.is_empty() {
+            ui.label("Features");
+            ui.label(features.as_ref());
+            ui.end_row();
+        }
+
+        ui.label("Platform");
+        ui.label(target_triple.as_ref());
+        ui.end_row();
+
+        if !rustc_version.is_empty() {
+            ui.label("Compiler");
+            let mut compiler = format!("rustc {rustc_version}");
+            if !llvm_version.is_empty() {
+                write!(compiler, ", LLVM {llvm_version}").ok();
+            }
+            ui.label(compiler);
+            ui.end_row();
+        }
+    });
+
+    if let Some(render_state) = render_state {
+        ui.add_space(SPACING);
+        render_state_ui(ui, render_state);
     }
 }
 
@@ -360,13 +433,13 @@ fn render_state_ui(ui: &mut egui::Ui, render_state: &egui_wgpu::RenderState) {
     };
 
     egui::Grid::new("wgpu_info").num_columns(2).show(ui, |ui| {
-        ui.label("Rendering backend:");
+        ui.label("Rendering backend");
         wgpu_adapter_ui(ui, &render_state.adapter);
         ui.end_row();
 
         #[cfg(not(target_arch = "wasm32"))]
         if 1 < render_state.available_adapters.len() {
-            ui.label("Other rendering backends:");
+            ui.label("Other rendering backends");
             ui.vertical(|ui| {
                 for adapter in &*render_state.available_adapters {
                     if adapter.get_info() != render_state.adapter.get_info() {
@@ -441,6 +514,7 @@ use re_viewer_context::CommandSender;
 fn debug_menu_options_ui(
     ui: &mut egui::Ui,
     app_options: &mut re_viewer_context::AppOptions,
+    active_recording_id: Option<&re_log_types::StoreId>,
     command_sender: &CommandSender,
 ) {
     use re_ui::UiExt as _;
@@ -465,7 +539,11 @@ fn debug_menu_options_ui(
         re_log::info!("Logging some info");
     }
 
-    UICommand::ToggleBlueprintInspectionPanel.menu_button_ui(ui, command_sender);
+    RecordingCommandKind::ToggleBlueprintInspectionPanel.menu_button_ui(
+        ui,
+        active_recording_id,
+        command_sender,
+    );
 
     ui.horizontal(|ui| {
         ui.label("Blueprint GC:");

@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use itertools::chain;
 use nohash_hasher::IntMap;
 use re_byte_size::{MemUsageNode, MemUsageTree, MemUsageTreeCapture, SizeBytes as _};
 use re_chunk::{
@@ -374,6 +375,15 @@ impl EntityDb {
     }
 
     /// Are we currently in the process of downloading the RRD Manifest?
+    pub fn is_downloading_manifest(&self) -> bool {
+        matches!(
+            self.redap_connection_state(),
+            RedapConnectionState::DownloadingFirstManifestPart
+                | RedapConnectionState::PartialManifest
+        )
+    }
+
+    /// Are we currently waiting for the first part of the RRD Manifest?
     pub fn is_downloading_first_part_of_manifest(&self) -> bool {
         self.redap_connection_state() == RedapConnectionState::DownloadingFirstManifestPart
     }
@@ -532,10 +542,12 @@ impl EntityDb {
         entity_path: &EntityPath,
         components: impl IntoIterator<Item = ComponentIdentifier>,
     ) -> re_query::LatestAtResults {
-        self.storage_engine
-            .read()
-            .cache()
-            .latest_at(query, entity_path, components)
+        self.storage_engine.read().cache().latest_at(
+            re_chunk_store::ChunkTrackingMode::Report,
+            query,
+            entity_path,
+            components,
+        )
     }
 
     /// Get the latest index and value for a given dense [`re_types_core::Component`].
@@ -616,9 +628,13 @@ impl EntityDb {
         component: ComponentIdentifier,
         query: &LatestAtQuery,
     ) -> bool {
+        let Some(timeline) = query.timeline() else {
+            return true; // Static-only query: there are no temporal chunks to load.
+        };
+
         !self
             .rrd_manifest_index()
-            .unloaded_temporal_entries_for(&query.timeline(), entity_path, Some(component))
+            .unloaded_temporal_entries_for(&timeline, entity_path, Some(component))
             .any(|chunk| chunk.time_range.contains(query.at()))
     }
 
@@ -795,7 +811,7 @@ impl EntityDb {
         let chunk_batch =
             re_sorbet::ChunkBatch::try_from(record_batch).map_err(re_chunk::ChunkError::from)?;
         let mut chunk = re_chunk::Chunk::from_chunk_batch(&chunk_batch)?;
-        chunk.sort_if_unsorted();
+        chunk.sort_by_row_ids_if_needed();
         self.add_chunk_with_timestamp_metadata(
             &Arc::new(chunk),
             &chunk_batch.sorbet_schema().timestamps,
@@ -1079,10 +1095,7 @@ impl EntityDb {
             itertools::Either::Right(std::iter::empty())
         };
 
-        set_store_info_msg
-            .into_iter()
-            .chain(data_messages)
-            .chain(blueprint_ready)
+        chain!(set_store_info_msg, data_messages, blueprint_ready)
     }
 
     /// Make a clone of this [`EntityDb`], assigning it a new [`StoreId`].

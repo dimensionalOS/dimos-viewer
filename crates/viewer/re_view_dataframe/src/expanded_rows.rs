@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 ///
 /// Note: each view should store its own cache. Using a [`re_viewer_context::ViewState`] is a
 /// good way to do this.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, re_byte_size::SizeBytes)]
 pub(crate) struct ExpandedRowsCache {
     /// Maps "table row number" to "additional lines".
     ///

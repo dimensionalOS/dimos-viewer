@@ -7,6 +7,7 @@
 #![allow(clippy::allow_attributes)]
 #![allow(clippy::clone_on_copy)]
 #![allow(clippy::cloned_instead_of_copied)]
+#![allow(clippy::eq_op)]
 #![allow(clippy::map_flatten)]
 #![allow(clippy::needless_question_mark)]
 #![allow(clippy::new_without_default)]
@@ -31,7 +32,16 @@ use ::re_types_core::{DeserializationError, DeserializationResult};
 /// row 1 | flat_columns[1] flat_columns[4] flat_columns[7]
 /// row 2 | flat_columns[2] flat_columns[5] flat_columns[8]
 /// ```
-#[derive(Clone, Debug, Copy, PartialEq, PartialOrd, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(
+    Clone,
+    Debug,
+    Copy,
+    PartialEq,
+    PartialOrd,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    ::re_byte_size::SizeBytes,
+)]
 #[repr(transparent)]
 pub struct Mat3x3(
     /// Flat list of matrix coefficients in column-major order.
@@ -126,9 +136,10 @@ impl ::re_types_core::Loggable for Mat3x3 {
             if arrow_data.is_empty() {
                 Vec::new()
             } else {
-                let offsets = (0..)
-                    .step_by(9usize)
-                    .zip((9usize..).step_by(9usize).take(arrow_data.len()));
+                let offsets = ::std::iter::zip(
+                    (0..).step_by(9usize),
+                    (9usize..).step_by(9usize).take(arrow_data.len()),
+                );
                 let arrow_data_inner = {
                     let arrow_data_inner = &**arrow_data.values();
                     arrow_data_inner
@@ -202,7 +213,7 @@ impl ::re_types_core::Loggable for Mat3x3 {
                     })
                     .with_context("rerun.datatypes.Mat3x3#flat_columns")?;
                 let arrow_data_inner = &**arrow_data.values();
-                bytemuck::cast_slice::<_, [_; 9usize]>(
+                bytemuck::cast_slice::<_, [f32; 9usize]>(
                     arrow_data_inner
                         .as_any()
                         .downcast_ref::<Float32Array>()
@@ -232,17 +243,5 @@ impl From<Mat3x3> for [f32; 9usize] {
     #[inline]
     fn from(value: Mat3x3) -> Self {
         value.0
-    }
-}
-
-impl ::re_byte_size::SizeBytes for Mat3x3 {
-    #[inline]
-    fn heap_size_bytes(&self) -> u64 {
-        self.0.heap_size_bytes()
-    }
-
-    #[inline]
-    fn is_pod() -> bool {
-        <[f32; 9usize]>::is_pod()
     }
 }

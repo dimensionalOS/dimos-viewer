@@ -27,7 +27,9 @@ pub use self::rrd_manifest_index::{
 };
 pub use self::store_bundle::{StoreBundle, StoreLoadError};
 pub use self::versioned_instance_path::{VersionedInstancePath, VersionedInstancePathHash};
+
 pub use re_chunk_store::EntityTree;
+pub use re_log_channel::LogSource;
 
 pub mod external {
     pub use {re_chunk_store, re_query};
@@ -49,23 +51,3 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-// ----------------------------------------------------------------------------
-
-/// A query in time.
-#[derive(Clone, Debug)]
-pub enum TimeQuery<Time> {
-    /// Get the latest version of the data available at this time.
-    LatestAt(Time),
-
-    /// Get all the data within this time interval, plus the latest
-    /// one before the start of the interval.
-    ///
-    /// Motivation: all data is considered alive until the next logging
-    /// to the same component path.
-    Range(std::ops::RangeInclusive<Time>),
-}
-
-impl TimeQuery<i64> {
-    pub const EVERYTHING: Self = Self::Range(i64::MIN..=i64::MAX);
-}

@@ -25,12 +25,14 @@ use re_viewer_context::{
 };
 use re_viewport_blueprint::ViewProperty;
 
+use crate::SpaceKind;
 use crate::contexts::register_spatial_contexts;
 use crate::heuristics::IndicatedVisualizableEntities;
 use crate::shared_fallbacks;
 use crate::spatial_topology::{HeuristicHints, SpatialTopology, SubSpaceConnectionFlags};
 use crate::ui::SpatialViewState;
-use crate::view_kind::SpatialViewKind;
+#[cfg(debug_assertions)]
+use crate::ui::bbox_debug_ui;
 use crate::visualizers::{
     CamerasVisualizer, TransformAxes3DVisualizer, register_3d_spatial_visualizers,
 };
@@ -105,11 +107,7 @@ impl ViewClass for SpatialView3D {
         );
 
         fn eye_property(ctx: &QueryContext<'_>) -> ViewProperty {
-            ViewProperty::from_archetype::<EyeControls3D>(
-                ctx.view_ctx.blueprint_db(),
-                ctx.view_ctx.blueprint_query(),
-                ctx.view_ctx.view_id,
-            )
+            ViewProperty::from_archetype::<EyeControls3D>(ctx.view_ctx)
         }
 
         system_registry.register_fallback_provider(
@@ -516,16 +514,10 @@ impl ViewClass for SpatialView3D {
             });
             ui.end_row();
 
-            state.bounding_box_ui(ui, SpatialViewKind::ThreeD);
+            state.bounding_box_ui(ui, SpaceKind::ThreeD);
 
             #[cfg(debug_assertions)]
-            {
-                ui.re_checkbox(&mut state.state_3d.show_smoothed_bbox, "Smoothed bbox");
-                ui.re_checkbox(
-                    &mut state.state_3d.show_per_entity_bbox,
-                    "Per-entity bboxes",
-                );
-            }
+            bbox_debug_ui(ui, state);
         });
 
         re_ui::list_item::list_item_scope(ui, "spatial_view3d_selection_ui", |ui| {
@@ -551,7 +543,7 @@ impl ViewClass for SpatialView3D {
         re_tracing::profile_function!();
 
         let state = state.downcast_mut::<SpatialViewState>()?;
-        state.update_frame_statistics(ui, &system_output, SpatialViewKind::ThreeD);
+        state.update_frame_statistics(ui, &system_output, SpaceKind::ThreeD);
 
         self.view_3d(ctx, missing_chunk_reporter, ui, state, query, system_output)
     }
@@ -561,11 +553,7 @@ impl ViewClass for SpatialView3D {
 // is suitable for the most part. However, as of writing the alpha color picker doesn't handle alpha
 // which we need here.
 fn view_property_ui_grid3d(ctx: &ViewContext<'_>, ui: &mut egui::Ui) {
-    let property = ViewProperty::from_archetype::<LineGrid3D>(
-        ctx.blueprint_db(),
-        ctx.blueprint_query(),
-        ctx.view_id,
-    );
+    let property = ViewProperty::from_archetype::<LineGrid3D>(ctx);
     let reflection = ctx.viewer_ctx.reflection();
     let Some(reflection) = reflection.archetypes.get(&property.archetype_name) else {
         ui.error_label(format!(

@@ -27,15 +27,17 @@ channels = ["conda-forge"]
 description = "Log images, point clouds, etc, and visualize them effortlessly"
 homepage = "https://rerun.io"
 license = "MIT OR Apache-2.0"
-platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64", "win-64"]
+platforms = [
+  { name = "linux-64-glibc-2-28", platform = "linux-64", glibc = "2.28" },
+  { name = "linux-aarch64-glibc-2-28", platform = "linux-aarch64", glibc = "2.28" },
+  { name = "osx-arm64-macos-11", platform = "osx-arm64", macos = "11.0" },
+  { name = "osx-64-macos-11", platform = "osx-64", macos = "11.0" },
+  "win-64",
+]
 readme = "README.md"
 repository = "https://github.com/rerun-io/rerun"
 version = "0.1.0" # TODO(emilk): sync version with `Cargo.toml` with help from `crates.py`
-requires-pixi = ">=0.55.0" # Make sure to keep this in sync with the version on our CI jobs!
-
-[system-requirements]
-macos = "11.0" # needed for some reason otherwise fails to resolve mediapipe package
-libc = "2.28"
+requires-pixi = ">=0.71.3" # Make sure to keep this in sync with the version on our CI jobs!
 
 
 # These should be kept empty as their content is pulled in every single environment. For the "standard" stuff,
@@ -63,6 +65,18 @@ EXECUTABLE_EXTENSION = ""
 # This ensures uv targets .venv instead of the pixi environment.
 PATH = "${PIXI_PROJECT_ROOT}/scripts/pixi:${PATH}"
 
+[target.linux-64.activation.env]
+# `gilrs` uses `pkg-config` to find libudev on Linux. Prefer Pixi's pkgconf and
+# make the Pixi pkg-config files visible before falling back to host paths.
+PKG_CONFIG = "pkgconf"
+PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
+
+[target.linux-aarch64.activation.env]
+# `gilrs` uses `pkg-config` to find libudev on Linux. Prefer Pixi's pkgconf and
+# make the Pixi pkg-config files visible before falling back to host paths.
+PKG_CONFIG = "pkgconf"
+PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
+
 [target.win-64.activation]
 # Run ensure-rerun-env to set up pyo3-build.cfg and uv shim.
 # This is a polyglot .bat that works in both cmd.exe and bash (Git Bash).
@@ -71,6 +85,9 @@ scripts = ["scripts/pixi/activate.bat"]
 [target.win-64.activation.env]
 # The executable extension for binaries on the current platform.
 EXECUTABLE_EXTENSION = ".exe"
+# cc-rs needs an archiver for wasm32 cross-compilation; MSVC's lib.exe isn't found
+# for non-MSVC targets, so point AR at llvm-ar from the llvm-tools conda package.
+AR = "llvm-ar"
 # Prepend scripts/pixi to PATH so our uv wrapper shadows the conda uv.
 # This ensures uv targets .venv instead of the pixi environment.
 PATH = "%PIXI_PROJECT_ROOT%\\scripts\\pixi;%PATH%"
@@ -102,6 +119,11 @@ default = ["base"]
 # in which you want to do viewer builds.
 cpp = ["base", "cpp"]
 
+# Test coverage tooling (cargo-llvm-cov + cargo-nextest). Kept out of the default
+# environment so normal dev/CI installs don't pull these tools, and so CI's own pinned
+# nextest (installed via taiki-e/install-action) isn't shadowed. Used by `rs-coverage`.
+coverage = ["base", "coverage"]
+
 ################################################################################
 # TASKS
 ################################################################################
@@ -130,6 +152,13 @@ man = "RERUN_DISABLE_WEB_VIEWER_SERVER=1 cargo run --package rerun-cli --all-fea
 #
 # You can also give an argument for what to view (e.g. an .rrd file).
 rerun = "cargo run --package rerun-cli --no-default-features --features release_no_web_viewer --"
+
+# Compile and run the rerun cli tool, without any viewer.
+#
+# This avoid recompiling the viewer when you just want to run a quick command.
+#
+# You can also give an argument for what to view (e.g. an .rrd file).
+rerun-cli = "cargo run --package rerun-cli --no-default-features --"
 
 # Compile and run the rerun viewer, with performance telemetry including Tracy profiler.
 #
@@ -164,6 +193,7 @@ rerun-build-native-and-web-release = { cmd = "cargo build --package rerun-cli --
 ] }
 
 rerun-build-native-and-pending-web-release = { cmd = "cargo build --package rerun-cli --no-default-features --features release_full --release --", env = { RERUN_TRAILING_WEB_VIEWER = "1" } }
+rerun-build-native-and-pending-web-release-zig = { cmd = "cargo zigbuild --locked --package rerun-cli --no-default-features --features release_full --release --target x86_64-unknown-linux-gnu.2.28", env = { RERUN_TRAILING_WEB_VIEWER = "1" } }
 
 # Compile and run the web-viewer via rerun-cli.
 #
@@ -209,8 +239,17 @@ rs-check = "python scripts/ci/rust_checks.py"
 # See tests/assets/rrd/README.md for more.
 # Note that we run with `--check-footers=false`: it is expected that these RRDs do not have proper footers (they predate them).
 check-backwards-compatibility = { cmd = "find tests/assets/rrd -name '*.rrd' -type f -print0 | xargs -0 cargo run --package rerun-cli --no-default-features rrd verify --check-footers=false" }
+web-test = { cmd = "wasm-pack test --headless --{{ browser }} crates/store/re_server --all-targets", args = [
+  { arg = "browser", default = "firefox" },
+] }
 
-rs-fmt = "cargo fmt --all"
+# `cargo fmt --all` only sees files reachable from each crate's lib.rs/main.rs.
+# Snippets in `docs/snippets/all/*.rs` are copied into the crate by `build.rs`,
+# so the originals are never formatted by cargo fmt. Run rustfmt on them
+# directly so `docs/snippets/rustfmt.toml` (max_width=80) is applied.
+# We filter to files containing `fn main()` to skip partial fragments
+# (they don't parse standalone).
+rs-fmt = { cmd = "cargo fmt --all && grep -rl 'fn main()' --include='*.rs' docs/snippets/all | xargs rustfmt --edition 2024" }
 
 # Code formatting for all languages.
 format = { depends-on = ["cpp-fmt", "misc-fmt", "pb-fmt", "py-fmt", "rs-fmt", "toml-fmt"] }
@@ -256,10 +295,10 @@ uv-lock-check = { depends-on = ["uv-lock-check-workspace", "uv-lock-check-isolat
 # * <https://buf.build/docs/breaking/rules/>
 # * <https://buf.build/docs/lint/rules/>
 
-pb-fmt-check = "buf format --exit-code --diff"
-pb-fmt = "buf format --exit-code --write"
+pb-fmt-check = "buf format --config scripts/ci/buf.yaml --exit-code --diff"
+pb-fmt = "buf format --config scripts/ci/buf.yaml --exit-code --write"
 
-pb-lint = "buf lint --error-format=json"
+pb-lint = "buf lint --config scripts/ci/buf.yaml --error-format=json"
 
 # NOTE(cmc): I'm keeping all the snapshot machinery around if it turns out we need something more robust
 # than a pure git solution in the future. For now, convenience wins.
@@ -276,7 +315,7 @@ pb-lint = "buf lint --error-format=json"
 #   "pb-snapshot-main",
 # ]}
 
-pb-breaking = "echo 'ℹ️ If this CI step is failing even though you did not modify any Protobuf files, that means that somebody purposefully published breaking Protobuf changes onto the main branch in the meantime.\nℹ️ For that reason, the Protobuf definitions on your local branch are now incompatible with those on main.\nℹ️ When that happens, simply rebase your branch on latest main, and the errors will go away.' ; buf breaking --error-format=json --against '.git#branch=origin/main'"
+pb-breaking = "echo 'ℹ️ If this CI step is failing even though you did not modify any Protobuf files, that means that somebody purposefully published breaking Protobuf changes onto the main branch in the meantime.\nℹ️ For that reason, the Protobuf definitions on your local branch are now incompatible with those on main.\nℹ️ When that happens, simply rebase your branch on latest main, and the errors will go away.' ; buf breaking --config scripts/ci/buf.yaml --against-config scripts/ci/buf.yaml --error-format=json --against '.git#branch=origin/main'"
 
 pb-check = { depends-on = ["pb-fmt-check", "pb-lint", "pb-breaking"] }
 
@@ -456,6 +495,7 @@ py-build-notebook-js = { cmd = "npm --prefix rerun_notebook run build", depends-
 
 # Build an installable SDK-only wheel. IMPORTANT: unlike the officially published wheels, the wheel produced by this command does NOT include the viewer.
 py-build-wheels-sdk-only = { cmd = "RERUN_ALLOW_MISSING_BIN=1 python scripts/ci/build_and_upload_wheels.py --mode pr --dir ''" }
+py-build-wheels-sdk-only-zig = { cmd = "RERUN_ALLOW_MISSING_BIN=1 python scripts/ci/build_and_upload_wheels.py --mode pr --dir '' --compat manylinux_2_28 --zig" }
 
 # Helper alias to run the python interpreter in the context of the python environment
 rrpy = "uvpy"
@@ -488,6 +528,23 @@ RUSTFLAGS = "-Z threads=0"
 [tasks.rerun-fast]
 cmd = "target/dev-fast/viewer"
 depends-on = ["rerun-build-fast"]
+
+# ------------------------------------------------------------------------------------------
+# Test coverage (cargo-llvm-cov + nextest) — see scripts/rs_coverage.sh for details.
+#
+# Lives in the dedicated `coverage` environment (see [environments]) so the default env
+# and CI stay lean. `pixi run rs-coverage` auto-selects that environment since the task
+# exists only there.
+#
+# Runs the test suite under source-based coverage instrumentation and writes lcov.info
+# (for the "Coverage Gutters" VS Code extension), a browsable HTML report, and a per-file
+# summary table in the terminal.
+#
+# With no argument it covers the whole workspace; pass a crate to scope it, e.g.
+#   pixi run rs-coverage re_dataframe
+[feature.coverage.tasks.rs-coverage]
+args = [{ arg = "crate", default = "--workspace" }]
+cmd = "bash scripts/rs_coverage.sh {{ crate }}"
 
 [feature.cpp.tasks]
 # All the cpp-* tasks can be configured with environment variables, e.g.: RERUN_WERROR=ON CXX=clang++
@@ -588,6 +645,7 @@ tqdm = ">=4.66.2,<4.67" # For displaying progress in various utility scripts.
 ty = "==0.0.31"
 typing_extensions = ">4.5"
 typos = ">=1.45.1"
+wasm-pack = "0.15.*"
 urllib3 = "<2.6.0" # TODO(googleapis/google-resumable-media-python#491)
 gh = ">=2.79.0,<3"
 binaryen = "117.*" # for `wasm-opt`
@@ -607,10 +665,28 @@ requests = ">=2.31,<3" # For `thumbnails.py` & `upload_image.py`
 rerun-pixi-env = { path = "rerun_pixi_env", editable = true }
 uv = "==0.9.17"
 
+# Test coverage tooling, isolated in the `coverage` environment (see [environments]).
+# Available on all supported platforms. `cargo-nextest` lives here rather than in `base`
+# on purpose: CI installs its own pinned nextest, and a second copy in the default env
+# would shadow it. Used only by the `rs-coverage` task.
+[feature.coverage.dependencies]
+cargo-nextest = ">=0.9.140" # Test runner driven by cargo-llvm-cov
+cargo-llvm-cov = ">=0.8.7" # Source-based Rust test coverage
+
 [target.linux-64.dependencies]
+cargo-zigbuild = "0.20.*"
+libudev = "257.4.*" # for `gilrs` Linux backend
 patchelf = ">=0.17"
+pkgconf = ">=2" # Provides `pkg-config` for `gilrs` Linux backend.
 meilisearch = "1.5.1.*" # not available for linux-aarch64
 buf = "1.*" # not available for linux-aarch64
+zig = "0.13.0.*"
+
+[target.linux-aarch64.dependencies]
+cargo-zigbuild = "0.20.*"
+libudev = "257.4.*" # for `gilrs` Linux backend
+pkgconf = ">=2" # Provides `pkg-config` for `gilrs` Linux backend.
+zig = "0.13.0.*"
 
 [target.osx-arm64.dependencies]
 buf = "1.*" # not available for linux-aarch64
@@ -620,6 +696,7 @@ llvm-tools = "16.0.6.*" # Various Wasm targets fail on mac without llvm-ar
 
 [target.win-64.dependencies]
 buf = "1.*" # not available for linux-aarch64
+llvm-tools = "16.0.6.*" # Wasm targets need llvm-ar for cc-rs (same as osx-arm64)
 
 [feature.cpp.target.linux-64.dependencies]
 sysroot_linux-64 = ">=2.17,<3" # rustc 1.64+ requires glibc 2.17+, see https://blog.rust-lang.org/2022/08/01/Increasing-glibc-kernel-requirements.html

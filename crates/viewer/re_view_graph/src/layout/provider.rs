@@ -95,8 +95,11 @@ pub fn update_simulation(
     simulation
 }
 
+#[derive(re_byte_size::SizeBytes)]
 pub struct ForceLayoutProvider {
     // If all nodes are fixed, we can skip the simulation.
+    // `fjadra::Simulation` keeps its internals private; count layout inputs we own.
+    #[size_bytes(ignore)]
     simulation: Option<fj::Simulation>,
     pub request: LayoutRequest,
 }

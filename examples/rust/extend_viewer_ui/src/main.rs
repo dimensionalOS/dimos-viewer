@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Listen for gRPC connections from Rerun's logging SDKs.
     // There are other ways of "feeding" the viewer though - all you need is a `re_log_channel::LogReceiver`.
-    let rx = re_grpc_server::spawn_with_recv(
+    let (rx, _grpc_server_handle) = re_grpc_server::spawn_with_recv(
         "0.0.0.0:9876".parse()?,
         Default::default(),
         re_grpc_server::shutdown::never(),
@@ -80,12 +80,16 @@ impl eframe::App for MyApp {
         // First add our panel(s):
         egui::Panel::right("my_side_panel")
             .default_size(200.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.ui(ui);
             });
 
         // Now show the Rerun Viewer in the remaining space:
         self.rerun_app.ui(ui, frame);
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.rerun_app.logic(ctx, frame);
     }
 }
 
@@ -160,10 +164,12 @@ fn component_ui(
     // just show the last value logged for each component:
     let query = re_chunk_store::LatestAtQuery::latest(timeline);
 
-    let results = entity_db
-        .storage_engine()
-        .cache()
-        .latest_at(&query, entity_path, [component]);
+    let results = entity_db.storage_engine().cache().latest_at(
+        re_chunk_store::ChunkTrackingMode::Report,
+        &query,
+        entity_path,
+        [component],
+    );
 
     if let Some(data) = results.component_batch_raw(component) {
         egui::ScrollArea::vertical()

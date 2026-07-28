@@ -310,7 +310,10 @@ pub enum BlueprintResolvedResults<'a> {
 impl BlueprintResolvedResults<'_> {
     pub fn timeline(&self) -> re_log_types::TimelineName {
         match self {
-            Self::LatestAt(query, _) => query.timeline(),
+            Self::LatestAt(query, _) => query.timeline().unwrap_or_else(|| {
+                re_log::error_once!("Blueprint latest-at query unexpectedly missing a timeline");
+                re_log_types::TimelineName::log_time()
+            }),
             Self::Range(query, _) => *query.timeline(),
         }
     }
@@ -564,12 +567,7 @@ impl BlueprintResolvedResultsExt<'_> for BlueprintResolvedRangeResults<'_> {
 
                 // TODO(cmc): this `collect_vec()` sucks, let's keep an eye on it and see if it ever
                 // becomes an issue.
-                Cow::Owned(
-                    defaults
-                        .into_iter()
-                        .chain(results_chunks.iter().cloned())
-                        .collect_vec(),
-                )
+                Cow::Owned(std::iter::chain(defaults, results_chunks.iter().cloned()).collect_vec())
             }
             ComponentSourceKind::Override => {
                 self.overrides

@@ -6,14 +6,16 @@ use re_entity_db::EntityDb;
 use re_log_types::{EntityPath, StoreId, TimePoint};
 use re_sdk_types::ComponentDescriptor;
 use re_ui::ContextExt as _;
+use re_ui::list_item::ListItem;
 
+use crate::command_sender::{SelectionSource, SetSelection};
 use crate::drag_and_drop::DragAndDropPayload;
 use crate::time_control::TimeControlCommand;
 use crate::{
-    ActiveStoreContext, AppOptions, ApplicationSelectionState, CommandSender, ComponentUiRegistry,
-    DragAndDropManager, FallbackProviderRegistry, FocusTarget, Item, ItemCollection, Route,
-    StorageContext, StoreHub, SystemCommand, SystemCommandSender as _, TableStores, TimeControl,
-    ViewClassRegistry,
+    ActiveStoreContext, AppCaches, AppOptions, ApplicationSelectionState, CommandSender,
+    ComponentUiRegistry, DragAndDropManager, FallbackProviderRegistry, FocusTarget, Item,
+    ItemCollection, Route, StorageContext, StoreHub, SystemCommand, SystemCommandSender as _,
+    TableStores, TimeControl, ViewClassRegistry,
 };
 
 /// Application context that is shared across all parts of the viewer.
@@ -21,6 +23,7 @@ use crate::{
 /// This context, in difference to [`crate::ViewerContext`] can exist for
 /// any arbitrary state of the viewer. And not only when there is an open
 /// recording.
+#[derive(Clone)]
 pub struct AppContext<'a> {
     /// Set during tests (e.g. snapshot tests).
     ///
@@ -53,6 +56,9 @@ pub struct AppContext<'a> {
     /// This is `None` if the current [`Route`] is not pointing to a recording.
     pub active_store_context: Option<&'a ActiveStoreContext<'a>>,
 
+    /// App-level caches for data that is not tied to any particular store.
+    pub app_caches: &'a AppCaches,
+
     /// How to display components.
     pub component_ui_registry: &'a ComponentUiRegistry,
 
@@ -77,13 +83,10 @@ pub struct AppContext<'a> {
     /// Helper object to manage drag-and-drop operations.
     pub drag_and_drop_manager: &'a DragAndDropManager,
 
-    /// The time control for the active recording, if any.
-    pub active_time_ctrl: Option<&'a TimeControl>,
-
     /// Where we are getting our data from.
     pub connected_receivers: &'a re_log_channel::LogReceiverSet,
 
-    /// Are we logged in to rerun cloud?
+    /// Are we logged in to Rerun Hub?
     pub auth_context: Option<&'a AuthContext>,
 
     /// Whether `OAuth` login is enabled in this viewer instance.
@@ -107,6 +110,16 @@ impl AppContext<'_> {
 
     pub fn selection_state(&self) -> &ApplicationSelectionState {
         self.selection_state
+    }
+
+    /// Interface for sending commands back to the app.
+    pub fn command_sender(&self) -> &CommandSender {
+        self.command_sender
+    }
+
+    /// The current route of the viewer.
+    pub fn route(&self) -> &Route {
+        self.route
     }
 
     /// Returns the current selection.
@@ -202,7 +215,7 @@ impl AppContext<'_> {
 
     /// The time control for the active recording, if any.
     pub fn active_time_ctrl(&self) -> Option<&TimeControl> {
-        self.active_time_ctrl
+        self.active_store_context.map(|ctx| ctx.time_ctrl)
     }
 
     /// Helper function to send [`TimeControlCommand`]s for the active recording.
@@ -233,11 +246,11 @@ impl AppContext<'_> {
     ) {
         let mut interacted_items = interacted_items.into();
 
-        if let Some(store_ctx) = self.active_store_context
-            && let Some(time_ctrl) = self.active_time_ctrl
-        {
-            interacted_items = interacted_items
-                .into_mono_instance_path_items(store_ctx.recording, &time_ctrl.current_query());
+        if let Some(store_ctx) = self.active_store_context {
+            interacted_items = interacted_items.into_mono_instance_path_items(
+                store_ctx.recording,
+                &store_ctx.time_ctrl.current_query(),
+            );
         }
         let selection_state = self.selection_state();
 
@@ -347,6 +360,59 @@ impl AppContext<'_> {
                     self.command_sender
                         .send_system(SystemCommand::set_selection(interacted_items));
                 }
+            }
+        }
+    }
+
+    /// Helper to synchronize item selection with egui focus.
+    ///
+    /// Call if _this_ is where the user would expect keyboard focus to be
+    /// when the item is selected (e.g. blueprint tree for views, recording panel for recordings).
+    pub fn handle_select_focus_sync(
+        &self,
+        response: &egui::Response,
+        interacted_items: impl Into<ItemCollection>,
+    ) {
+        let mut interacted_items = interacted_items.into();
+
+        // If we have an active recording, resolve to mono-instance paths so selection matches
+        // what the rest of the viewer selects.
+        if let Some(store_ctx) = self.active_store_context {
+            interacted_items = interacted_items.into_mono_instance_path_items(
+                store_ctx.recording,
+                &store_ctx.time_ctrl.current_query(),
+            );
+        }
+
+        // Focus -> Selection
+
+        // We want the item to be selected if it was selected with arrow keys (in list_item)
+        // but not when focused using e.g. the tab key.
+        if ListItem::gained_focus_via_arrow_key(&response.ctx, response.id) {
+            self.command_sender.send_system(SystemCommand::SetSelection(
+                SetSelection::new(interacted_items.clone())
+                    .with_source(SelectionSource::ListItemNavigation),
+            ));
+        }
+
+        // Selection -> Focus
+
+        let single_selected = self.selection().single_item() == interacted_items.single_item();
+        if single_selected {
+            // If selection changes, and a single item is selected, the selected item should
+            // receive egui focus.
+            // We don't do this if selection happened due to list item navigation to avoid
+            // a feedback loop.
+            let selection_changed = self
+                .selection_state()
+                .selection_changed()
+                .is_some_and(|source| source != SelectionSource::ListItemNavigation);
+
+            // If there is a single selected item and nothing is focused, focus that item.
+            let nothing_focused = response.ctx.memory(|mem| mem.focused().is_none());
+
+            if selection_changed || nothing_focused {
+                response.request_focus();
             }
         }
     }

@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use egui::{Modifiers, NumExt as _, Rect, Response};
 use re_data_ui::{DataUi as _, item_ui};
 use re_entity_db::InstancePathHash;
@@ -52,6 +54,36 @@ impl Default for MapViewState {
     }
 }
 
+impl re_byte_size::SizeBytes for MapViewState {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            tiles,
+            map_memory: _,
+            selected_provider,
+            last_center_position: _,
+            last_gpu_picking_result: _,
+        } = self;
+
+        // `walkers::HttpTiles` keeps its tile cache private, so this is a best-effort estimate
+        // based on walkers 0.53 internals: an LRU cache with capacity 256 plus the currently queued
+        // download ids.
+        // - `TilesIo::new`: <https://docs.rs/walkers/0.53.0/src/walkers/io/tiles_io.rs.html#57>
+        // - `HttpTiles::stats`: <https://docs.rs/walkers/0.53.0/src/walkers/http_tiles.rs.html#61>
+        // Texture memory itself is tracked by egui/wgpu.
+        let tiles = tiles.as_ref().map_or(0, |tiles| {
+            const WALKERS_TILE_CACHE_CAPACITY: usize = 256;
+
+            let tile_cache = WALKERS_TILE_CACHE_CAPACITY
+                * (size_of::<(walkers::TileId, Option<walkers::Tile>)>() + 1);
+            let in_progress = tiles.stats().in_progress * size_of::<walkers::TileId>();
+
+            (tile_cache + in_progress) as u64
+        });
+
+        tiles + selected_provider.heap_size_bytes()
+    }
+}
+
 impl MapViewState {
     // This method ensures that tiles is initialized and returns mutable references to tiles and map_memory.
     pub fn ensure_and_get_mut_refs(
@@ -80,6 +112,10 @@ impl ViewState for MapViewState {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+
+    fn heap_size_bytes(&self) -> u64 {
+        re_byte_size::SizeBytes::heap_size_bytes(self)
     }
 }
 
@@ -196,32 +232,21 @@ impl ViewClass for MapView {
         system_output: SystemExecutionOutput,
     ) -> Result<(), ViewSystemExecutionError> {
         let state = state.downcast_mut::<MapViewState>()?;
-        let map_background = ViewProperty::from_archetype::<MapBackground>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
+        let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin);
+        let map_background = ViewProperty::from_archetype::<MapBackground>(&view_ctx);
+        let map_zoom = ViewProperty::from_archetype::<MapZoom>(&view_ctx);
 
-        let map_zoom = ViewProperty::from_archetype::<MapZoom>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
-
-        let empty_geo_points = GeoPointsOutput::default();
-        let empty_geo_line_strings = GeoLineStringsOutput::default();
         let geo_points_visualizer = system_output
-            .visualizer_data::<GeoPointsOutput>(GeoPointsVisualizer::identifier())
-            .unwrap_or(&empty_geo_points);
+            .visualizer_data_or_default::<GeoPointsOutput>(GeoPointsVisualizer::identifier())?;
         let geo_line_strings_visualizers = system_output
-            .visualizer_data::<GeoLineStringsOutput>(GeoLineStringsVisualizer::identifier())
-            .unwrap_or(&empty_geo_line_strings);
+            .visualizer_data_or_default::<GeoLineStringsOutput>(
+                GeoLineStringsVisualizer::identifier(),
+            )?;
 
         //
         // Map Provider
         //
 
-        let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin);
         let map_provider = map_background
             .component_or_fallback(&view_ctx, MapBackground::descriptor_provider().component)?;
         if state.selected_provider != map_provider {
@@ -321,8 +346,14 @@ impl ViewClass for MapView {
             map_rect,
         );
 
-        let mut view_builder =
-            create_view_builder(ctx, ui.ctx(), map_rect, &query.highlights, picking_config)?;
+        let mut view_builder = create_view_builder(
+            ctx,
+            ui.ctx(),
+            query.view_id.render_view_id(),
+            map_rect,
+            &query.highlights,
+            picking_config,
+        )?;
 
         geo_line_strings_visualizers.queue_draw_data(
             ctx.render_ctx(),
@@ -360,6 +391,7 @@ impl ViewClass for MapView {
 fn create_view_builder(
     ctx: &ViewerContext<'_>,
     egui_ctx: &egui::Context,
+    view_id: re_renderer::ViewBuilderId,
     view_rect: Rect,
     highlights: &ViewHighlights,
     picking_config: Option<ViewPickingConfiguration>,
@@ -399,6 +431,7 @@ fn create_view_builder(
 
             picking_config,
         },
+        view_id,
     )
 }
 

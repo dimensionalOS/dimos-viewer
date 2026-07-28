@@ -5,7 +5,9 @@ use re_log::debug_assert;
 use crate::codegen::rust::arrow::{
     ArrowDataTypeTokenizer, is_backed_by_scalar_buffer, quote_fqname_as_type_path,
 };
-use crate::codegen::rust::util::{is_tuple_struct_from_obj, quote_comment};
+use crate::codegen::rust::util::{
+    is_tuple_struct_from_obj, quote_comment, quote_default_value_for_datatype,
+};
 use crate::data_type::{AtomicDataType, DataType, UnionMode};
 use crate::{Object, Objects, TypeRegistry};
 
@@ -237,11 +239,11 @@ pub fn quote_arrow_deserializer(
                     } else {
                         let (#data_src_fields, #data_src_arrays) = (#data_src.fields(), #data_src.columns());
 
-                        let arrays_by_name: ::std::collections::HashMap<_, _> = #data_src_fields
-                            .iter()
-                            .map(|field| field.name().as_str())
-                            .zip(#data_src_arrays)
-                            .collect();
+                        let arrays_by_name: ::std::collections::HashMap<_, _> = ::std::iter::zip(
+                            #data_src_fields.iter().map(|field| field.name().as_str()),
+                            #data_src_arrays,
+                        )
+                        .collect();
 
                         #(#quoted_field_deserializers;)*
 
@@ -492,10 +494,8 @@ fn quote_arrow_field_deserializer(
     _ = is_nullable; // not yet used, will be needed very soon
 
     // If the inner object is an enum, then dispatch to its deserializer.
-    if let DataType::Object { fqname, .. } = datatype
-        && objects.get(fqname).is_some_and(|obj| obj.is_enum())
-    {
-        let fqname_use = quote_fqname_as_type_path(fqname);
+    if let Some(obj) = datatype.enum_obj(objects) {
+        let fqname_use = quote_fqname_as_type_path(&obj.fqname);
         return quote!(#fqname_use::from_arrow_opt(#data_src).with_context(#obj_field_fqname)?.into_iter());
     }
 
@@ -662,6 +662,26 @@ fn quote_arrow_field_deserializer(
                 None,
             );
 
+            let is_enum = inner.data_type().enum_obj(objects).is_some();
+            let quoted_enum_missing_check = if is_enum {
+                quote! {
+                    if data.iter().any(Option::is_none) {
+                        return Err(DeserializationError::missing_data());
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            // Enums have no `Default` impl, so fall back to their first variant instead.
+            // (See the note below on why we need to fill in _something_ here.)
+            let quoted_unwrap = if is_enum {
+                let quoted_default_value =
+                    quote_default_value_for_datatype(objects, inner.data_type());
+                quote!(.map(|opt| opt.unwrap_or_else(|| #quoted_default_value)))
+            } else {
+                quote!(.map(Option::unwrap_or_default))
+            };
+
             let comment_note_unwrap =
                 quote_comment("NOTE: Unwrapping cannot fail: the length must be correct.");
 
@@ -674,7 +694,10 @@ fn quote_arrow_field_deserializer(
                     // datastructures for all of our children.
                     Vec::new()
                 } else {
-                    let offsets = (0..).step_by(#length).zip((#length..).step_by(#length).take(#data_src.len()));
+                    let offsets = ::std::iter::zip(
+                        (0..).step_by(#length),
+                        (#length..).step_by(#length).take(#data_src.len()),
+                    );
 
                     let #data_src_inner = {
                         let #data_src_inner = &**#data_src.values();
@@ -702,6 +725,8 @@ fn quote_arrow_field_deserializer(
                                 #[expect(unsafe_code, clippy::undocumented_unsafe_blocks)]
                                 let data = unsafe { #data_src_inner.get_unchecked(start..end) };
 
+                                #quoted_enum_missing_check
+
                                 // NOTE: The call to `Option::unwrap_or_default` is very important here.
                                 //
                                 // Since we can only get here if the outer entry is marked as
@@ -722,7 +747,7 @@ fn quote_arrow_field_deserializer(
                                 // is null.
                                 //
                                 // TODO(#2875): use MaybeUninit rather than requiring a default impl
-                                let data = data.iter().cloned().map(Option::unwrap_or_default);
+                                let data = data.iter().cloned() #quoted_unwrap;
                                 // The following would be the correct thing to do, but costs us way
                                 // too much performance-wise for something that only applies to
                                 // malformed inputs.
@@ -949,6 +974,7 @@ fn quote_iterator_transparency(
     } else {
         None
     };
+
     let inner_is_arrow_transparent = inner_obj.is_some_and(|obj| obj.datatype.is_none());
 
     if inner_is_arrow_transparent {
@@ -1122,7 +1148,7 @@ fn quote_arrow_field_deserializer_buffer_slice(
             }
         }
 
-        DataType::FixedSizeList(inner, length) => {
+        DataType::FixedSizeList(inner, _) => {
             let data_src_inner = format_ident!("{data_src}_inner");
             let quoted_inner = quote_arrow_field_deserializer_buffer_slice(
                 inner.data_type(),
@@ -1141,14 +1167,47 @@ fn quote_arrow_field_deserializer_buffer_slice(
                 )
             };
 
+            // Fully spell out the target type of the cast: type inference fails for
+            // nested fixed-size lists, where only the outermost type is pinned down.
+            let quoted_elem_type = quote_buffer_slice_element_type(datatype);
+
             quote! {{
                 let #data_src = #quoted_downcast?;
 
                 let #data_src_inner = &**#data_src.values();
-                bytemuck::cast_slice::<_, [_; #length]>(#quoted_inner)
+                bytemuck::cast_slice::<_, #quoted_elem_type>(#quoted_inner)
             }}
         }
 
+        _ => unimplemented!("{datatype:#?}"),
+    }
+}
+
+/// The native Rust type of a buffer-slice-deserialized element, fully spelled out
+/// (e.g. `[[half::f16; 3]; 15]`), so that the generated `bytemuck` casts don't have
+/// to rely on type inference.
+fn quote_buffer_slice_element_type(datatype: &DataType) -> TokenStream {
+    match datatype.to_logical_type() {
+        DataType::Atomic(atomic) => match atomic {
+            AtomicDataType::UInt8 => quote!(u8),
+            AtomicDataType::UInt16 => quote!(u16),
+            AtomicDataType::UInt32 => quote!(u32),
+            AtomicDataType::UInt64 => quote!(u64),
+            AtomicDataType::Int8 => quote!(i8),
+            AtomicDataType::Int16 => quote!(i16),
+            AtomicDataType::Int32 => quote!(i32),
+            AtomicDataType::Int64 => quote!(i64),
+            AtomicDataType::Float16 => quote!(half::f16),
+            AtomicDataType::Float32 => quote!(f32),
+            AtomicDataType::Float64 => quote!(f64),
+            AtomicDataType::Null | AtomicDataType::Boolean => {
+                unimplemented!("{atomic:#?} not supported by the buffer-slice fast path")
+            }
+        },
+        DataType::FixedSizeList(inner, length) => {
+            let quoted_inner = quote_buffer_slice_element_type(inner.data_type());
+            quote!([#quoted_inner; #length])
+        }
         _ => unimplemented!("{datatype:#?}"),
     }
 }
@@ -1165,6 +1224,7 @@ fn quote_arrow_field_deserializer_buffer_slice(
 ///
 /// This should always be checked before using [`quote_arrow_deserializer_buffer_slice`].
 pub fn should_optimize_buffer_slice_deserialize(
+    objects: &Objects,
     obj: &Object,
     type_registry: &TypeRegistry,
 ) -> bool {
@@ -1172,23 +1232,27 @@ pub fn should_optimize_buffer_slice_deserialize(
     if is_arrow_transparent {
         let typ = type_registry.get(&obj.fqname);
         let obj_field = &obj.fields[0];
-        !obj_field.is_nullable && should_optimize_buffer_slice_deserialize_datatype(&typ)
+        !obj_field.is_nullable && should_optimize_buffer_slice_deserialize_datatype(objects, &typ)
     } else {
         false
     }
 }
 
 /// Whether or not this datatype allows for the buffer slice optimizations.
-fn should_optimize_buffer_slice_deserialize_datatype(typ: &DataType) -> bool {
+fn should_optimize_buffer_slice_deserialize_datatype(objects: &Objects, typ: &DataType) -> bool {
     match typ {
         DataType::Atomic(atomic) => {
             !matches!(atomic, AtomicDataType::Null | AtomicDataType::Boolean)
         }
         DataType::Object { datatype, .. } => {
-            should_optimize_buffer_slice_deserialize_datatype(datatype)
+            typ.enum_obj(objects).is_none()
+                && should_optimize_buffer_slice_deserialize_datatype(objects, datatype)
         }
         DataType::FixedSizeList(field, _) => {
-            should_optimize_buffer_slice_deserialize_datatype(field.data_type())
+            // A wrapper-object element would break the generated `bytemuck` casts, which
+            // produce bare nested arrays rather than wrapper structs.
+            !matches!(field.data_type(), DataType::Object { .. })
+                && should_optimize_buffer_slice_deserialize_datatype(objects, field.data_type())
         }
         _ => false,
     }

@@ -106,7 +106,7 @@ impl Arrows3DVisualizer {
                 obj_space_bounding_box.extend(end);
             }
 
-            data.add_bounding_box(entity_path.hash(), obj_space_bounding_box, world_from_obj);
+            data.add_bounding_box_3d(entity_path.hash(), obj_space_bounding_box, world_from_obj);
 
             {
                 let instance_positions = {
@@ -159,7 +159,10 @@ struct Arrows3DComponentData<'a> {
 
 impl IdentifiedViewSystem for Arrows3DVisualizer {
     fn identifier() -> re_viewer_context::ViewSystemIdentifier {
-        "Arrows3D".into()
+        re_viewer_context::external::re_string_interner::intern_static!(
+            re_viewer_context::ViewSystemIdentifier,
+            "Arrows3D"
+        )
     }
 }
 

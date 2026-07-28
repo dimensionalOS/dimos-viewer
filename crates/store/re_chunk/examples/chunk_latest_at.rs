@@ -8,7 +8,7 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!("Data:\n{chunk}");
 
-    let query = LatestAtQuery::new(TimelineName::new("frame"), 4);
+    let query = LatestAtQuery::new(TimelineName::from("frame"), 4);
 
     // Find all relevant data for a query:
     let Some(unit) = chunk.latest_at(&query, MyPoints::descriptor_points().component) else {
@@ -77,7 +77,7 @@ fn create_chunk() -> anyhow::Result<Chunk> {
         )
         .build()?;
 
-    chunk.sort_if_unsorted();
+    chunk.sort_by_row_ids_if_needed();
 
     Ok(chunk)
 }

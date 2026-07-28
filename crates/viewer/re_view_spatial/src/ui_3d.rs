@@ -3,7 +3,6 @@ use egui::{Modifiers, NumExt as _};
 use glam::Vec3;
 use macaw::BoundingBox;
 use re_chunk_store::MissingChunkReporter;
-use re_log_types::Instance;
 use re_renderer::view_builder::{Projection, TargetConfiguration, ViewBuilder};
 use re_renderer::{LineDrawableBuilder, Size};
 use re_sdk_types::blueprint::archetypes::{
@@ -24,16 +23,16 @@ use re_viewer_context::{
 use re_viewport_blueprint::ViewProperty;
 
 use super::eye::{Eye, EyeState};
+use crate::SpaceKind;
 use crate::SpatialView3D;
 use crate::eye::find_camera;
 use crate::pinhole_wrapper::PinholeWrapper;
-use crate::ui::{SpatialViewState, create_labels};
-use crate::view_kind::SpatialViewKind;
-use crate::visualizers::{CamerasVisualizerOutput, collect_ui_labels};
+use crate::ui::{SpatialViewState, create_labels, draw_bounding_boxes, draw_origin_axes};
+use crate::visualizers::{Axes, CamerasVisualizerOutput, collect_ui_labels};
 
 // ---
 
-#[derive(Clone)]
+#[derive(Clone, re_byte_size::SizeBytes)]
 pub struct View3DState {
     pub eye_state: EyeState,
 
@@ -43,9 +42,6 @@ pub struct View3DState {
 
     eye_interact_fade_in: bool,
     eye_interact_fade_change_time: f64,
-
-    pub show_smoothed_bbox: bool,
-    pub show_per_entity_bbox: bool,
 }
 
 impl Default for View3DState {
@@ -55,8 +51,6 @@ impl Default for View3DState {
             scene_view_coordinates: None,
             eye_interact_fade_in: false,
             eye_interact_fade_change_time: f64::NEG_INFINITY,
-            show_smoothed_bbox: false,
-            show_per_entity_bbox: false,
         }
     }
 }
@@ -132,13 +126,11 @@ impl SpatialView3D {
         re_tracing::profile_function!();
 
         let highlights = &query.highlights;
-        let empty_cameras = Vec::new();
-        let space_cameras = system_output
-            .visualizer_data::<CamerasVisualizerOutput>(
-                crate::visualizers::CamerasVisualizer::identifier(),
-            )
-            .map(|d| &d.pinhole_cameras)
-            .unwrap_or(&empty_cameras);
+        let cameras = system_output.visualizer_data_or_default::<CamerasVisualizerOutput>(
+            crate::visualizers::CamerasVisualizer::identifier(),
+        )?;
+        let space_cameras = &cameras.pinhole_cameras;
+
         let scene_view_coordinates = query_view_coordinates_at_closest_ancestor(
             query.space_origin,
             ctx.recording(),
@@ -156,11 +148,8 @@ impl SpatialView3D {
 
         let view_context = self.view_context(ctx, query.view_id, state, query.space_origin);
 
-        let information_property = ViewProperty::from_archetype::<SpatialInformation>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
+        let information_property =
+            ViewProperty::from_archetype::<SpatialInformation>(&view_context);
 
         let show_axes = **information_property.component_or_fallback::<Enabled>(
             &view_context,
@@ -172,14 +161,25 @@ impl SpatialView3D {
         )?;
         state_3d.update(scene_view_coordinates);
 
+        let is_selected_view = ctx
+            .selection_state()
+            .selected_items()
+            .single_item()
+            .and_then(Item::view_id)
+            == Some(query.view_id);
+        let enable_gamepad_navigation =
+            ctx.app_options().experimental.gamepad_navigation && is_selected_view;
+
         let eye = state_3d.eye_state.update(
             &view_context,
             &response,
             space_cameras,
             &state.bounding_boxes,
+            enable_gamepad_navigation,
         )?;
 
         state.state_3d = state_3d;
+        state.show_bounding_box = show_bounding_box;
 
         // Determine view port resolution and position.
         let resolution_in_pixel =
@@ -197,27 +197,10 @@ impl SpatialView3D {
         line_builder.reserve_strips(32)?;
         line_builder.reserve_vertices(64)?;
 
-        // Origin gizmo if requested.
-        // TODO(andreas): Move this to the transform3d_arrow scene part.
-        //              As of #2522 state is now longer accessible there, move the property to a context?
         if show_axes {
-            let axis_length = 1.0; // The axes are also a measuring stick
-            crate::visualizers::add_axis_arrows(
-                ctx.tokens(),
-                &mut line_builder,
-                glam::Affine3A::IDENTITY,
-                None,
-                axis_length,
-                re_renderer::OutlineMaskPreference::NONE,
-                Instance::ALL.get(),
-            );
-
-            // If we are showing the axes for the space, then add the space origin to the region of interest, but not the scene bounding box.
-            state
-                .bounding_boxes
-                .region_of_interest_current
-                .extend(glam::Vec3::ZERO);
+            draw_origin_axes(ctx.tokens(), &mut line_builder, state, Axes::Xyz);
         }
+        draw_bounding_boxes(ctx.tokens(), &mut line_builder, state);
 
         // Create labels now since their shapes participate are added to scene.ui for picking.
         let (label_shapes, ui_rects) = create_labels(
@@ -226,7 +209,7 @@ impl SpatialView3D {
             &eye,
             ui,
             highlights,
-            SpatialViewKind::ThreeD,
+            SpaceKind::ThreeD,
         );
 
         let (response, picking_config) = if let Some(pointer_pos_ui) = response.hover_pos() {
@@ -249,7 +232,7 @@ impl SpatialView3D {
                 &system_output,
                 &ui_rects,
                 query,
-                SpatialViewKind::ThreeD,
+                SpaceKind::ThreeD,
             )?
         } else {
             state.previous_picking_result = None;
@@ -280,13 +263,14 @@ impl SpatialView3D {
             picking_config,
         };
 
-        let mut view_builder = ViewBuilder::new(ctx.render_ctx(), target_config)?;
+        let mut view_builder = ViewBuilder::new(
+            ctx.render_ctx(),
+            target_config,
+            query.view_id.render_view_id(),
+        )?;
 
-        let eye_property = ViewProperty::from_archetype::<EyeControls3D>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
+        let eye_property =
+            ViewProperty::from_archetype_for_view::<EyeControls3D>(ctx, query.view_id);
 
         // Track focused entity if any.
         if let Some(focused_item) = ctx.focused_item() {
@@ -386,40 +370,6 @@ impl SpatialView3D {
             );
         }
 
-        // TODO(andreas): Make configurable. Could pick up default radius for this view?
-        let box_line_radius = Size(*re_sdk_types::components::Radius::default().0);
-
-        // TODO(andreas): Make this an enum so the user can choose between showing
-        // the bounding box (all entities), the region of interest, or per-entity bounding boxes.
-        if show_bounding_box {
-            line_builder
-                .batch("scene_bbox_current")
-                .add_box_outline(&state.bounding_boxes.current)
-                .map(|lines| {
-                    lines
-                        .radius(box_line_radius)
-                        .color(ui.tokens().frustum_color)
-                });
-        }
-        if state.state_3d.show_smoothed_bbox {
-            line_builder
-                .batch("scene_region_of_interest_smoothed")
-                .add_box_outline(&state.bounding_boxes.region_of_interest_smoothed)
-                .map(|lines| {
-                    lines
-                        .radius(box_line_radius)
-                        .color(ctx.tokens().frustum_color)
-                });
-        }
-        if state.state_3d.show_per_entity_bbox {
-            let mut batch = line_builder.batch("per_entity_regions_of_interest");
-            for region_of_interest in state.bounding_boxes.region_of_interest_per_entity.values() {
-                batch
-                    .add_box_outline(region_of_interest)
-                    .map(|lines| lines.radius(box_line_radius).color(egui::Color32::YELLOW));
-            }
-        }
-
         show_orbit_eye_center(
             ui.ctx(),
             &mut state.state_3d,
@@ -434,11 +384,7 @@ impl SpatialView3D {
         let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin);
 
         // Optional 3D line grid.
-        let grid_config = ViewProperty::from_archetype::<LineGrid3D>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
+        let grid_config = ViewProperty::from_archetype::<LineGrid3D>(&view_ctx);
         if let Some(draw_data) = Self::setup_grid_3d(&view_ctx, &grid_config)? {
             view_builder.queue_draw(ctx.render_ctx(), draw_data);
         }
@@ -446,11 +392,7 @@ impl SpatialView3D {
         // Commit ui induced lines.
         view_builder.queue_draw(ctx.render_ctx(), line_builder.into_draw_data()?);
 
-        let background = ViewProperty::from_archetype::<Background>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
+        let background = ViewProperty::from_archetype::<Background>(&view_ctx);
         let (background_drawable, clear_color) =
             crate::configure_background(&view_ctx, &background)?;
         if let Some(background_drawable) = background_drawable {
@@ -627,8 +569,14 @@ fn show_projections_from_2d_space(
     ray_color: egui::Color32,
 ) {
     match item_context {
-        ItemContext::TwoD { space_2d, pos } => {
-            if let Some(cam) = cameras.iter().find(|cam| &cam.ent_path == space_2d) {
+        ItemContext::TwoD {
+            space_2d_target_frame,
+            pos,
+        } => {
+            if let Some(cam) = cameras
+                .iter()
+                .find(|cam| &cam.pinhole_child_frame_id == space_2d_target_frame)
+            {
                 // Render a thick line to the actual z value if any and a weaker one as an extension
                 // If we don't have a z value, we only render the thick one.
                 let depth = if 0.0 < pos.z && pos.z.is_finite() {

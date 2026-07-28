@@ -12,7 +12,7 @@ use re_chunk::external::nohash_hasher::IntMap;
 use re_chunk::external::re_byte_size;
 use re_chunk::{ArchetypeName, ChunkError, ChunkId, ComponentIdentifier, ComponentType, Timeline};
 use re_log_types::external::re_tuid::Tuid;
-use re_log_types::{AbsoluteTimeRange, EntityPath, StoreId, TimeType};
+use re_log_types::{AbsoluteTimeRange, EntityPath, StoreId, TimeType, TimelineName};
 use re_types_core::ComponentDescriptor;
 
 use crate::{CodecError, CodecResult, Decodable as _, StreamFooterEntry, ToApplication as _};
@@ -133,7 +133,7 @@ use crate::{CodecError, CodecResult, Decodable as _, StreamFooterEntry, ToApplic
 /// which in turn will affect the Sorbet schema of the recording too.
 ///
 /// Filtering RRD manifests is very non trivial and should only be performed with great care.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, re_byte_size::SizeBytes)]
 pub struct RawRrdManifest {
     /// The recording ID that was used to identify the original recording.
     ///
@@ -166,26 +166,11 @@ pub struct RawRrdManifest {
     pub data: arrow::array::RecordBatch,
 }
 
-impl re_byte_size::SizeBytes for RawRrdManifest {
-    fn heap_size_bytes(&self) -> u64 {
-        re_tracing::profile_function!();
-
-        let Self {
-            store_id,
-            sorbet_schema,
-            sorbet_schema_sha256: _,
-            data,
-        } = self;
-
-        store_id.heap_size_bytes() + sorbet_schema.heap_size_bytes() + data.heap_size_bytes()
-    }
-}
-
 /// A map based representation of the static data within an [`RawRrdManifest`].
 pub type RrdManifestStaticMap = IntMap<EntityPath, IntMap<ComponentIdentifier, ChunkId>>;
 
 /// The individual entries in an [`RrdManifestTemporalMap`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, re_byte_size::SizeBytes)]
 pub struct RrdManifestTemporalMapEntry {
     /// The time range covered by this entry.
     pub time_range: AbsoluteTimeRange,
@@ -195,17 +180,6 @@ pub struct RrdManifestTemporalMapEntry {
     /// At most, this is the same as the number of rows in the chunk as a whole. For a specific
     /// entry it might be less, since chunks allow sparse components.
     pub num_rows: u64,
-}
-
-impl re_byte_size::SizeBytes for RrdManifestTemporalMapEntry {
-    fn heap_size_bytes(&self) -> u64 {
-        0
-    }
-
-    #[inline]
-    fn is_pod() -> bool {
-        true
-    }
 }
 
 /// A map based representation of the temporal data within an [`RawRrdManifest`].
@@ -410,13 +384,12 @@ impl RawRrdManifest {
 
             let rrd_footer =
                 re_protos::log_msg::v1alpha1::RrdFooter::from_rrd_bytes(rrd_footer_bytes)?;
-            manifests.extend(
-                rrd_footer
-                    .manifests
-                    .iter()
-                    .map(|manifest| manifest.to_application(()))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+            let new_manifests: Vec<_> = rrd_footer
+                .manifests
+                .iter()
+                .map(|manifest| manifest.to_application(()))
+                .try_collect()?;
+            manifests.extend(new_manifests);
         }
 
         Ok(manifests)
@@ -442,10 +415,8 @@ impl RawRrdManifest {
             use re_byte_size::SizeBytes as _;
             let byte_size_uncompressed = chunk.heap_size_bytes();
 
-            let uncompressed_byte_span = re_span::Span {
-                start: offset,
-                len: byte_size_uncompressed,
-            };
+            let uncompressed_byte_span =
+                re_span::Span::from_start_len(offset, byte_size_uncompressed);
 
             offset += byte_size_uncompressed;
 
@@ -500,8 +471,8 @@ impl RawRrdManifest {
         let chunk_entity_paths = self.col_chunk_entity_path()?;
         let chunk_is_static = self.col_chunk_is_static()?;
 
-        let has_static_component_data =
-            itertools::izip!(self.data.schema_ref().fields().iter(), self.data.columns(),)
+        let has_static_component_data: Vec<_> =
+            itertools::izip!(self.data.schema_ref().fields(), self.data.columns(),)
                 .filter(|(f, _c)| f.name().ends_with(":has_static_data"))
                 .map(|(f, c)| {
                     c.downcast_array_ref::<arrow::array::BooleanArray>()
@@ -514,7 +485,7 @@ impl RawRrdManifest {
                         })
                         .map(|c| (f, c))
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .try_collect()?;
 
         for (i, (chunk_id, is_static, entity_path)) in
             itertools::izip!(chunk_ids, chunk_is_static, chunk_entity_paths).enumerate()
@@ -537,7 +508,11 @@ impl RawRrdManifest {
                         ),
                     }));
                 };
-                let component = ComponentIdentifier::new(component);
+                let component = ComponentIdentifier::try_new(component).map_err(|err| {
+                    CodecError::from(ChunkError::Malformed {
+                        reason: err.to_string(),
+                    })
+                })?;
 
                 let per_component = per_entity.entry(entity_path.clone()).or_default();
 
@@ -691,8 +666,12 @@ impl RawRrdManifest {
                     continue;
                 }
 
-                let component = ComponentIdentifier::new(component);
-                let timeline = Timeline::new(*index, *time_type);
+                let component = ComponentIdentifier::try_new(component).map_err(|err| {
+                    CodecError::from(ChunkError::Malformed {
+                        reason: err.to_string(),
+                    })
+                })?;
+                let timeline = Timeline::new(TimelineName::try_new(*index)?, *time_type);
 
                 let per_timeline = per_entity.entry(entity_path.clone()).or_default();
                 let per_component = per_timeline.entry(timeline).or_default();
@@ -1164,11 +1143,17 @@ impl RawRrdManifest {
                     }));
                 };
                 let descr = ComponentDescriptor {
-                    archetype: md.get("rerun:archetype").map(|s| ArchetypeName::new(s)),
-                    component: ComponentIdentifier::new(component),
+                    archetype: md
+                        .get("rerun:archetype")
+                        .and_then(|s| ArchetypeName::try_new(s).ok()),
+                    component: ComponentIdentifier::try_new(component).map_err(|err| {
+                        CodecError::from(ChunkError::Malformed {
+                            reason: err.to_string(),
+                        })
+                    })?,
                     component_type: md
                         .get("rerun:component_type")
-                        .map(|s| ComponentType::new(s)),
+                        .and_then(|s| ComponentType::try_new(s).ok()),
                 };
                 let column_name = Self::compute_column_name(
                     None,
@@ -1240,11 +1225,17 @@ impl RawRrdManifest {
                     }));
                 };
                 let descr = ComponentDescriptor {
-                    archetype: md.get("rerun:archetype").map(|s| ArchetypeName::new(s)),
-                    component: ComponentIdentifier::new(component),
+                    archetype: md
+                        .get("rerun:archetype")
+                        .and_then(|s| ArchetypeName::try_new(s).ok()),
+                    component: ComponentIdentifier::try_new(component).map_err(|err| {
+                        CodecError::from(ChunkError::Malformed {
+                            reason: err.to_string(),
+                        })
+                    })?,
                     component_type: md
                         .get("rerun:component_type")
-                        .map(|s| ComponentType::new(s)),
+                        .and_then(|s| ComponentType::try_new(s).ok()),
                 };
 
                 for suffix in ["start", "end"] {
@@ -1333,7 +1324,7 @@ impl RawRrdManifest {
     pub const FIELD_CHUNK_BYTE_SIZE_UNCOMPRESSED: &str = "chunk_byte_size_uncompressed";
     pub const FIELD_CHUNK_KEY: &str = "chunk_key";
 
-    /// These fields might be returned by some implementations (such as Rerun Cloud) that do not
+    /// These fields might be returned by some implementations (such as Rerun Hub) that do not
     /// support fetching chunks with only a set of chunk-keys.
     /// We generally want to ignore them during tests and sanity checking, and just blindly forward
     /// them as-is otherwise.

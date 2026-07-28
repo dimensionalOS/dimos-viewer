@@ -8,38 +8,10 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 from inline_snapshot import snapshot as inline_snapshot
-from rerun.experimental import Chunk, Lens, LensOutput, RrdReader, Selector
+from rerun.experimental import Chunk, DeriveLens, LazyChunkStream, Lens, MutateLens, RrdReader, Selector
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-# ---------------------------------------------------------------------------
-# from_record_batch
-# ---------------------------------------------------------------------------
-
-
-def test_chunk_from_record_batch_round_trip(test_rrd_path: Path) -> None:
-    """to_record_batch() -> from_record_batch() round-trips correctly."""
-    chunks = RrdReader(test_rrd_path).stream().to_chunks()
-    assert len(chunks) > 0
-
-    for original in chunks:
-        rb = original.to_record_batch()
-        restored = Chunk.from_record_batch(rb)
-        assert restored.entity_path == original.entity_path
-        assert restored.num_rows == original.num_rows
-        assert restored.num_columns == original.num_columns
-        assert restored.is_static == original.is_static
-        assert sorted(restored.timeline_names) == sorted(original.timeline_names)
-
-
-def test_chunk_from_record_batch_rejects_plain_batch() -> None:
-    """from_record_batch() raises on a RecordBatch without Rerun metadata."""
-
-    plain_batch = pa.record_batch({"x": [1, 2, 3]})
-    with pytest.raises(ValueError):
-        Chunk.from_record_batch(plain_batch)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +72,37 @@ def test_chunk_from_columns_static() -> None:
 │ │ ARROW:extension:name: TUID                    ┆ component: Points3D:positions                   │ │
 │ │ is_sorted: true                               ┆ component_type: Position3D                      │ │
 │ │ kind: control                                 ┆ kind: data                                      │ │
+│ ╞═══════════════════════════════════════════════╪═════════════════════════════════════════════════╡ │
+│ │ row_[**REDACTED**]                            ┆ [[1.0, 2.0, 3.0]]                               │ │
+│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
+│ │ row_[**REDACTED**]                            ┆ [[4.0, 5.0, 6.0]]                               │ │
+│ └───────────────────────────────────────────────┴─────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────┘\
+""")
+
+
+def test_chunk_format_keeps_rerun_metadata_prefixes() -> None:
+    """`trim_metadata_keys=False` preserves the `rerun:` / `sorbet:` prefixes on metadata keys."""
+    chunk = Chunk.from_columns(
+        "/test/static",
+        indexes=[],
+        columns=rr.Points3D.columns(positions=[[1, 2, 3], [4, 5, 6]]),
+    )
+    assert chunk.format(redact=True, trim_metadata_keys=False) == inline_snapshot("""\
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ METADATA:                                                                                           │
+│ * rerun:entity_path: /test/static                                                                   │
+│ * rerun:id: [**REDACTED**]                                                                          │
+│ * sorbet:version: [**REDACTED**]                                                                    │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ ┌───────────────────────────────────────────────┬─────────────────────────────────────────────────┐ │
+│ │ RowId                                         ┆ Points3D:positions                              │ │
+│ │ ---                                           ┆ ---                                             │ │
+│ │ type: non-null FixedSizeBinary(16)            ┆ type: List(FixedSizeList(3 x non-null Float32)) │ │
+│ │ ARROW:extension:metadata: {"namespace":"row"} ┆ rerun:archetype: Points3D                       │ │
+│ │ ARROW:extension:name: TUID                    ┆ rerun:component: Points3D:positions             │ │
+│ │ rerun:is_sorted: true                         ┆ rerun:component_type: Position3D                │ │
+│ │ rerun:kind: control                           ┆ rerun:kind: data                                │ │
 │ ╞═══════════════════════════════════════════════╪═════════════════════════════════════════════════╡ │
 │ │ row_[**REDACTED**]                            ┆ [[1.0, 2.0, 3.0]]                               │ │
 │ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
@@ -207,10 +210,7 @@ def test_apply_lenses_field_extraction() -> None:
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\
 """)
 
-    lens = Lens(
-        "Imu:accel",
-        LensOutput().to_component(rr.Scalars.descriptor_scalars(), ".x"),
-    )
+    lens = DeriveLens("Imu:accel").to_component(rr.Scalars.descriptor_scalars(), ".x")
     results = chunk.apply_lenses(lens)
 
     assert len(results) == 1
@@ -239,6 +239,25 @@ def test_apply_lenses_field_extraction() -> None:
 """)
 
 
+def test_apply_lenses_string_prefix_builtin() -> None:
+    """apply_lenses can use the built-in string_prefix selector function."""
+    image_data = pa.StructArray.from_arrays(
+        [pa.array(["png", "jpeg"], type=pa.string())],
+        names=["format"],
+    )
+    chunk = Chunk.from_columns(
+        "/camera",
+        indexes=[rr.TimeColumn("frame", sequence=[0, 1])],
+        columns=rr.DynamicArchetype.columns(archetype="Image", components={"format": image_data}),
+    )
+
+    lens = DeriveLens("Image:format").to_component("Image:mime", '.format | string_prefix("image/")')
+    results = chunk.apply_lenses(lens)
+
+    assert len(results) == 1
+    assert results[0].to_record_batch().column("Image:mime").to_pylist() == [["image/png"], ["image/jpeg"]]
+
+
 def test_apply_lenses_no_match() -> None:
     """apply_lenses forwards the original chunk when no lens input component matches."""
     chunk = Chunk.from_columns(
@@ -247,10 +266,7 @@ def test_apply_lenses_no_match() -> None:
         columns=rr.Points3D.columns(positions=[[1, 2, 3]]),
     )
 
-    lens = Lens(
-        "Nonexistent:foo",
-        LensOutput().to_component("out:bar", "."),
-    )
+    lens = DeriveLens("Nonexistent:foo").to_component("out:bar", ".")
     results = chunk.apply_lenses(lens)
     assert len(results) == 1
     assert str(results[0]) == str(chunk)  # TODO(ab): we should have Chunk.__eq__
@@ -301,14 +317,11 @@ def test_apply_lenses_multiple_outputs() -> None:
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\
 """)
 
-    lens = Lens(
-        "Imu:accel",
-        to_entity={
-            "/out/x": LensOutput().to_component(rr.Scalars.descriptor_scalars(), ".x"),
-            "/out/y": LensOutput().to_component(rr.Scalars.descriptor_scalars(), ".y"),
-        },
-    )
-    results = chunk.apply_lenses(lens)
+    lenses = [
+        DeriveLens("Imu:accel", output_entity="/out/x").to_component(rr.Scalars.descriptor_scalars(), ".x"),
+        DeriveLens("Imu:accel", output_entity="/out/y").to_component(rr.Scalars.descriptor_scalars(), ".y"),
+    ]
+    results = chunk.apply_lenses(lenses)
 
     assert len(results) == 2
 
@@ -395,14 +408,11 @@ def test_apply_lenses_multiple_outputs_preserves_other_columns() -> None:
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\
 """)
 
-    lens = Lens(
-        "Imu:accel",
-        to_entity={
-            "/out/x": LensOutput().to_component(rr.Scalars.descriptor_scalars(), ".x"),
-            "/out/y": LensOutput().to_component(rr.Scalars.descriptor_scalars(), ".y"),
-        },
-    )
-    results = chunk.apply_lenses(lens)
+    lenses = [
+        DeriveLens("Imu:accel", output_entity="/out/x").to_component(rr.Scalars.descriptor_scalars(), ".x"),
+        DeriveLens("Imu:accel", output_entity="/out/y").to_component(rr.Scalars.descriptor_scalars(), ".y"),
+    ]
+    results = chunk.apply_lenses(lenses)
 
     # The original chunk should not be forwarded as is, so it's id must not be visible here
     assert chunk.id not in {r.id for r in results}
@@ -470,6 +480,183 @@ def test_apply_lenses_multiple_outputs_preserves_other_columns() -> None:
     ])
 
 
+def test_apply_lenses_combined_mutate_derive_and_derive_to_entity() -> None:
+    """Combining MutateLens, DeriveLens, and DeriveLens(output_entity=\u2026) in one call."""
+    data = pa.StructArray.from_arrays(
+        [pa.array([1.0, 2.0], type=pa.float64()), pa.array([3.0, 4.0], type=pa.float64())],
+        names=["x", "y"],
+    )
+    chunk = Chunk.from_columns(
+        "/sensor",
+        indexes=[rr.TimeColumn("frame", sequence=[0, 1])],
+        columns=rr.DynamicArchetype.columns(archetype="Imu", components={"accel": data}),
+    )
+
+    lenses: list[Lens] = [
+        # Mutate the original component in-place (extracts .x, replacing the struct)
+        MutateLens("Imu:accel", ".x"),
+        # Derive .y as a Scalar at the same entity
+        DeriveLens("Imu:accel").to_component(rr.Scalars.descriptor_scalars(), ".y"),
+        # Derive .x as a Scalar at a different entity
+        DeriveLens("Imu:accel", output_entity="/derived").to_component(rr.Scalars.descriptor_scalars(), ".x"),
+    ]
+    results = chunk.apply_lenses(lenses)
+
+    assert chunk.id not in {r.id for r in results}
+    assert [r.format(redact=True) for r in results] == inline_snapshot([
+        """\
+┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ METADATA:                                                                                                                 │
+│ * entity_path: /sensor                                                                                                    │
+│ * id: [**REDACTED**]                                                                                                      │
+│ * version: [**REDACTED**]                                                                                                 │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ ┌───────────────────────────────────────────────┬───────────────────┬──────────────────────┬────────────────────────────┐ │
+│ │ RowId                                         ┆ frame             ┆ Imu:accel            ┆ Scalars:scalars            │ │
+│ │ ---                                           ┆ ---               ┆ ---                  ┆ ---                        │ │
+│ │ type: non-null FixedSizeBinary(16)            ┆ type: Int64       ┆ type: List(Float64)  ┆ type: List(Float64)        │ │
+│ │ ARROW:extension:metadata: {"namespace":"row"} ┆ index_name: frame ┆ archetype: Imu       ┆ archetype: Scalars         │ │
+│ │ ARROW:extension:name: TUID                    ┆ is_sorted: true   ┆ component: Imu:accel ┆ component: Scalars:scalars │ │
+│ │ is_sorted: true                               ┆ kind: index       ┆ kind: data           ┆ component_type: Scalar     │ │
+│ │ kind: control                                 ┆                   ┆                      ┆ kind: data                 │ │
+│ ╞═══════════════════════════════════════════════╪═══════════════════╪══════════════════════╪════════════════════════════╡ │
+│ │ row_[**REDACTED**]                            ┆ 0                 ┆ [1.0]                ┆ [3.0]                      │ │
+│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
+│ │ row_[**REDACTED**]                            ┆ 1                 ┆ [2.0]                ┆ [4.0]                      │ │
+│ └───────────────────────────────────────────────┴───────────────────┴──────────────────────┴────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\
+""",
+        """\
+┌────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ METADATA:                                                                                          │
+│ * entity_path: /derived                                                                            │
+│ * id: [**REDACTED**]                                                                               │
+│ * version: [**REDACTED**]                                                                          │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ ┌───────────────────────────────────────────────┬───────────────────┬────────────────────────────┐ │
+│ │ RowId                                         ┆ frame             ┆ Scalars:scalars            │ │
+│ │ ---                                           ┆ ---               ┆ ---                        │ │
+│ │ type: non-null FixedSizeBinary(16)            ┆ type: Int64       ┆ type: List(Float64)        │ │
+│ │ ARROW:extension:metadata: {"namespace":"row"} ┆ index_name: frame ┆ archetype: Scalars         │ │
+│ │ ARROW:extension:name: TUID                    ┆ is_sorted: true   ┆ component: Scalars:scalars │ │
+│ │ is_sorted: true                               ┆ kind: index       ┆ component_type: Scalar     │ │
+│ │ kind: control                                 ┆                   ┆ kind: data                 │ │
+│ ╞═══════════════════════════════════════════════╪═══════════════════╪════════════════════════════╡ │
+│ │ row_[**REDACTED**]                            ┆ 0                 ┆ [1.0]                      │ │
+│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
+│ │ row_[**REDACTED**]                            ┆ 1                 ┆ [2.0]                      │ │
+│ └───────────────────────────────────────────────┴───────────────────┴────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────────────────────────────────┘\
+""",
+    ])
+
+
+def test_apply_lenses_mutate_same_column_collision() -> None:
+    """Two MutateLens on the same column raises an error."""
+    data = pa.StructArray.from_arrays(
+        [pa.array([1.0, 2.0], type=pa.float64()), pa.array([3.0, 4.0], type=pa.float64())],
+        names=["x", "y"],
+    )
+    chunk = Chunk.from_columns(
+        "/sensor",
+        indexes=[rr.TimeColumn("frame", sequence=[0, 1])],
+        columns=rr.DynamicArchetype.columns(archetype="Imu", components={"accel": data}),
+    )
+
+    lenses = [
+        MutateLens("Imu:accel", ".x"),  # first wins
+        MutateLens("Imu:accel", ".y"),  # collision
+    ]
+    with pytest.raises(ValueError, match="collision"):
+        chunk.apply_lenses(lenses)
+
+
+def _int64_accel_chunk() -> Chunk:
+    """A chunk with a single Int64-typed `Imu:accel` component column."""
+    return Chunk.from_columns(
+        "/sensor",
+        indexes=[rr.TimeColumn("frame", sequence=[0, 1])],
+        columns=rr.DynamicArchetype.columns(archetype="Imu", components={"accel": pa.array([1, 2], type=pa.int64())}),
+    )
+
+
+def _component_value_type(chunks: list[Chunk], column_name: str) -> pa.DataType:
+    """The element type of the named component column across the produced chunks."""
+    for chunk in chunks:
+        for field in chunk.to_record_batch().schema:
+            if field.name == column_name:
+                return field.type.value_type
+    raise AssertionError(f"column {column_name} not found in produced chunks")
+
+
+def test_apply_lenses_cast_to_auto() -> None:
+    """`cast_to="auto"` casts the output to the component's canonical type (Scalar -> float64)."""
+    chunk = _int64_accel_chunk()
+    lens = DeriveLens("Imu:accel", output_entity="/derived").to_component(
+        rr.Scalars.descriptor_scalars(), ".", cast_to="auto"
+    )
+    results = chunk.apply_lenses([lens])
+    assert _component_value_type(results, "Scalars:scalars") == pa.float64()
+
+
+def test_apply_lenses_cast_to_explicit_type() -> None:
+    """`cast_to=<pa.DataType>` casts the output to that explicit type."""
+    chunk = _int64_accel_chunk()
+    lens = DeriveLens("Imu:accel", output_entity="/derived").to_component(
+        rr.Scalars.descriptor_scalars(), ".", cast_to=pa.float32()
+    )
+    results = chunk.apply_lenses([lens])
+    assert _component_value_type(results, "Scalars:scalars") == pa.float32()
+
+
+def test_apply_lenses_no_cast_preserves_type() -> None:
+    """Without `cast_to`, the produced column is emitted as-is (Int64 here)."""
+    chunk = _int64_accel_chunk()
+    lens = DeriveLens("Imu:accel", output_entity="/derived").to_component(rr.Scalars.descriptor_scalars(), ".")
+    results = chunk.apply_lenses([lens])
+    assert _component_value_type(results, "Scalars:scalars") == pa.int64()
+
+
+def test_apply_lenses_derive_same_entity_collision() -> None:
+    """Two DeriveLens targeting the same output component on the same entity raises an error."""
+    data = pa.StructArray.from_arrays(
+        [pa.array([1.0, 2.0], type=pa.float64()), pa.array([3.0, 4.0], type=pa.float64())],
+        names=["x", "y"],
+    )
+    chunk = Chunk.from_columns(
+        "/sensor",
+        indexes=[rr.TimeColumn("frame", sequence=[0, 1])],
+        columns=rr.DynamicArchetype.columns(archetype="Imu", components={"accel": data}),
+    )
+
+    lenses = [
+        DeriveLens("Imu:accel").to_component("shared", ".x"),  # first wins
+        DeriveLens("Imu:accel").to_component("shared", ".y"),  # collision
+    ]
+    with pytest.raises(ValueError, match="collision"):
+        chunk.apply_lenses(lenses)
+
+
+def test_apply_lenses_derive_new_entity_collision() -> None:
+    """Two DeriveLens targeting the same output component on a new entity raises an error."""
+    data = pa.StructArray.from_arrays(
+        [pa.array([1.0, 2.0], type=pa.float64()), pa.array([3.0, 4.0], type=pa.float64())],
+        names=["x", "y"],
+    )
+    chunk = Chunk.from_columns(
+        "/sensor",
+        indexes=[rr.TimeColumn("frame", sequence=[0, 1])],
+        columns=rr.DynamicArchetype.columns(archetype="Imu", components={"accel": data}),
+    )
+
+    lenses = [
+        DeriveLens("Imu:accel", output_entity="/new").to_component("shared", ".x"),  # first wins
+        DeriveLens("Imu:accel", output_entity="/new").to_component("shared", ".y"),  # collision
+    ]
+    with pytest.raises(ValueError, match="collision"):
+        chunk.apply_lenses(lenses)
+
+
 def test_apply_lenses_time_extraction() -> None:
     """apply_lenses can extract a time column from struct data."""
     data = pa.StructArray.from_arrays(
@@ -508,11 +695,10 @@ def test_apply_lenses_time_extraction() -> None:
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\
 """)
 
-    lens = Lens(
-        "Sensor:data",
-        LensOutput()
+    lens = (
+        DeriveLens("Sensor:data")
         .to_component(rr.Scalars.descriptor_scalars(), ".value")
-        .to_timeline("sensor_time", "timestamp_ns", ".ts"),
+        .to_timeline("sensor_time", "timestamp_ns", ".ts")
     )
     results = chunk.apply_lenses(lens)
 
@@ -580,10 +766,7 @@ def test_apply_lenses_with_pipe() -> None:
 """)
 
     selector = Selector(".x").pipe(lambda arr: pc.multiply(arr, 2.0))
-    lens = Lens(
-        "S:d",
-        LensOutput().to_component(rr.Scalars.descriptor_scalars(), selector),
-    )
+    lens = DeriveLens("S:d").to_component(rr.Scalars.descriptor_scalars(), selector)
     results = chunk.apply_lenses(lens)
 
     assert len(results) == 1
@@ -695,3 +878,71 @@ def test_apply_selector_component_not_found() -> None:
 
     with pytest.raises(ValueError, match="not found"):
         chunk.apply_selector("nonexistent:component", Selector("."))
+
+
+# ---------------------------------------------------------------------------
+# with_entity_path
+# ---------------------------------------------------------------------------
+
+
+def test_with_entity_path_preserves_data() -> None:
+    """with_entity_path swaps the entity path and assigns a fresh chunk ID while preserving rows and components."""
+    chunk = Chunk.from_columns(
+        "/sensor",
+        indexes=[rr.TimeColumn("frame", sequence=[0, 1])],
+        columns=rr.Points3D.columns(positions=[[1, 2, 3], [4, 5, 6]]),
+    )
+    moved = chunk.with_entity_path("/left/sensor")
+
+    assert moved.entity_path == "/left/sensor"
+    assert moved.id != chunk.id
+    assert moved.num_rows == chunk.num_rows
+    assert moved.num_columns == chunk.num_columns
+    assert sorted(moved.timeline_names) == sorted(chunk.timeline_names)
+
+
+def _write_simple_rrd(path: Path, app_id: str, recording_id: str, *, send_properties: bool) -> None:
+    """Write an RRD with a fixed two-entity, two-archetype schema."""
+    with rr.RecordingStream(app_id, recording_id=recording_id, send_properties=send_properties) as rec:
+        rec.save(path)
+        rec.send_columns(
+            "/points",
+            indexes=[rr.TimeColumn("frame", sequence=[0, 1])],
+            columns=rr.Points3D.columns(positions=[[1, 2, 3], [4, 5, 6]]),
+        )
+        rec.send_columns(
+            "/log",
+            indexes=[rr.TimeColumn("frame", sequence=[0])],
+            columns=rr.TextLog.columns(text=["hello"]),
+        )
+
+
+@pytest.mark.parametrize("send_properties", [False, True])
+def test_merge_two_rrds_with_distinct_entity_path_prefixes(tmp_path: Path, send_properties: bool) -> None:
+    """
+    Merge two RRDs with the same schema, prefixing each side's entity paths uniquely.
+
+    Parametrized over `send_properties` to cover both the clean case (no auto properties chunk)
+    and the realistic case (recordings with `/__properties` need to be filtered out before
+    prefixing, so each merged recording keeps a single canonical properties chunk).
+    """
+    a_path = tmp_path / "a.rrd"
+    b_path = tmp_path / "b.rrd"
+    _write_simple_rrd(a_path, "merge_test_a", "rec_a", send_properties=send_properties)
+    _write_simple_rrd(b_path, "merge_test_b", "rec_b", send_properties=send_properties)
+
+    def prefixed(reader: RrdReader, prefix: str) -> LazyChunkStream:
+        stream = reader.stream()
+        if send_properties:
+            # Properties are recording-scope and shouldn't be relocated under a prefix.
+            stream = stream.drop(content=f"{rr.RECORDING_PROPERTIES_PATH}/**")
+        return stream.map(lambda c: c.with_entity_path(f"{prefix}{c.entity_path}"))
+
+    left = prefixed(RrdReader(a_path), "/left")
+    right = prefixed(RrdReader(b_path), "/right")
+
+    merged_path = tmp_path / "merged.rrd"
+    LazyChunkStream.merge(left, right).write_rrd(merged_path, application_id="merged", recording_id="merged")
+
+    paths = set(RrdReader(merged_path).store().schema().entity_paths())
+    assert paths == {"/left/points", "/left/log", "/right/points", "/right/log"}

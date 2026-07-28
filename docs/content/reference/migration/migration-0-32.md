@@ -59,11 +59,23 @@ rerun-importer-my-format
 
 ## Lenses API (Rust)
 
-### `EntityPathFilter` removed from `Lens`
+The Lenses API has been restructured and simplified.
 
-Entity path filtering is no longer part of the `Lens` itself. A `Lens` now operates purely
-on component columns within a chunk. Entity path filtering is a separate concern handled
-either upstream (e.g. via stream filtering) or at the `Lenses` collection level.
+### Entity path filtering moved to `Lenses`
+
+Entity path filtering is no longer part of the `Lens` itself. Use
+`Lenses::add_lens_with_filter`:
+
+```rust
+let lenses = Lenses::new(OutputMode::DropUnmatched)
+    .add_lens_with_filter(EntityPathFilter::parse_forgiving("sensors/**"), lens);
+```
+
+This makes applying lenses to individual chunks more ergonomic.
+
+### New builder API
+
+Lenses are now created through `Lens::derive()`, `Lens::scatter()`, and `Lens::mutate()`:
 
 ```rust
 // Before
@@ -71,43 +83,45 @@ Lens::for_input_column(EntityPathFilter::all(), "component")
     .output_columns(|out| { /* … */ })?
     .build()
 
-// After
-Lens::for_input_column("component")
-    .output_columns(|out| { /* … */ })?
-    .build()
+// After - derive lens (1:1 row mapping)
+Lens::derive("component")
+    .to_component(component_descr, ".field")
+    .build()?
+
+// After - scatter lens (1:N row mapping)
+Lens::scatter("component")
+    .output_entity("/target")
+    .to_component(component_descr, ".field")
+    .build()?
+
+// After - mutate lens (modifies component in-place)
+Lens::mutate("component", ".field").build()
 ```
 
-If you need entity path filtering, use `Lenses::add_lens_with_filter`:
+To output columns to multiple entities from a single component, multiple lenses can be registered for the same input component.
 
-```rust
-let lenses = Lenses::new(OutputMode::DropUnmatched)
-    .add_lens_with_filter(EntityPathFilter::parse_forgiving("sensors/**"), lens);
-```
-
-### `scatter` moved from `LensOutput` to `Lens`
-
-Scatter (1:N row mapping) is now a property of the `Lens`, not of individual outputs.
-The `output_scatter_columns` and `output_scatter_columns_at` methods have been removed.
-Use `LensBuilder::scatter()` before `output_columns` / `output_columns_at` instead:
-
-```rust
-// Before
-Lens::for_input_column("component")
-    .output_scatter_columns_at("/target", |out| { /* … */ })?
-    .build()
-
-// After
-Lens::for_input_column("component")
-    .scatter()
-    .output_columns_at("/target", |out| { /* … */ })?
-    .build()
-```
-
-Lenses that scatter are only available in Rust.
-
-## `rerun rrd compact` renamed to `rerun rrd optimize`
+## `rerun rrd compact` renamed to `rerun rrd optimize`, has profiles and new defaults
 
 `rerun rrd compact` is now `rerun rrd optimize`.
+
+A new `--profile` argument has been added to opt to known good values.
+Two profiles are available: `live` (optimized for the live Viewer workflow, same as previous defaults) and `object-store` (optimized for querying and streaming from object-store-backed storage, e.g. a catalog server). <!-- NOLINT -->
+
+By default, the `object-store` profile is now used. Use `--profile live` to keep the previous behavior. <!-- NOLINT -->
+
+## `DatasetEntry.register` requires a sequence of URIs (Python)
+
+`DatasetEntry.register` no longer accepts a single URI string for `recording_uri`.
+Pass a sequence of URIs instead, and prefer batching many URIs into a single `register` call rather than calling `register` repeatedly in a loop (which is much slower).
+
+Old single-string invocations still work at runtime but emit a `DeprecationWarning`.
+
+```diff
+- dataset.register(url, layer_name="base")
++ dataset.register([url], layer_name="base")
+```
+
+`layer_name` is unchanged: pass a single string to apply one layer to all recordings, or a sequence matching the length of `recording_uri`.
 
 ## URDF importer transform entity
 
@@ -115,3 +129,25 @@ The [URDF importer](../../howto/logging-and-ingestion/urdf.md) now loads the sta
 This replaces the model-dependent entity path of previous versions, and improves consistency with ROS data.
 
 A custom entity path can be now also configured in the `UrdfTree` API in Python and Rust, if desired.
+
+## MCAP metadata and statistics
+
+In MCAP to RRD conversion, metadata records, statistics, and recording info are now saved at dedicated [reserved entity paths](../../concepts/logging-and-ingestion/entity-path.md#reserved-paths) instead of RRD properties (`__properties`).
+
+Metadata records are saved under `__mcap_metadata`, and MCAP statistics and recording info are saved under `__mcap_properties`.
+
+## `rerun.recording` deprecated in favor of `RrdReader`
+
+The `rerun.recording` module — `Recording`, `RRDArchive`, `load_recording`, `load_archive` — is deprecated.
+Use `rerun.experimental.RrdReader` instead, which natively supports multi-store RRDs (multiple recordings and blueprints in one file) and lazy loading.
+
+| Before                                               | After                                                                                     |
+|------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| `rr.recording.load_recording(path)`                  | `rr.experimental.RrdReader(path).store()`                                                 |
+| `rr.recording.load_archive(path)`                    | `rr.experimental.RrdReader(path)`                                                         |
+| `archive.all_recordings()`                           | `reader.recordings()` then `reader.store(store=entry)`                                    |
+| `recording.application_id()` / `recording_id()`      | `StoreEntry.application_id` / `recording_id` (from `reader.recordings()`)                 |
+| `Recording.from_chunks(chunks, app, rec).save(path)` | `LazyChunkStream.from_iter(chunks).write_rrd(path, application_id=app, recording_id=rec)` |
+| `rr.send_recording(rec)`                             | `rr.experimental.send_chunks(reader.store())`                                             |
+| `RecordingStream.send_recording(rec)`                | `RecordingStream.send_chunks(rec)`                                                        |
+| `DatasetEntry.download_segment(seg)`                 | `DatasetEntry.segment_store(seg)`                                                         |

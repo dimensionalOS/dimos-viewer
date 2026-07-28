@@ -8,6 +8,7 @@ mod display_record_batch;
 mod filters;
 mod grid_view;
 mod header_tooltip;
+mod preview_renderer;
 mod re_table;
 pub mod re_table_utils;
 mod requested_object;
@@ -51,12 +52,11 @@ fn create_channel<T>(
     crossbeam::channel::Sender<T>,
     crossbeam::channel::Receiver<T>,
 ) {
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "wasm32")] {
+    cfg_select! {
+        target_arch = "wasm32" => {
             _ = size;
             crossbeam::channel::unbounded() // we're not allowed to block on web
-        } else {
-            crossbeam::channel::bounded(size)
         }
+        _ => crossbeam::channel::bounded(size),
     }
 }

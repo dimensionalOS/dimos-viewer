@@ -7,8 +7,17 @@ use crate::{ArchetypeName, ComponentIdentifier, ComponentType};
 /// Every component at a given entity path is uniquely identified by the
 /// `component` field of the descriptor. The `archetype` and `component_type`
 /// fields provide additional information about the semantics of the data.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    re_byte_size::SizeBytes,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 pub struct ComponentDescriptor {
     /// Optional name of the `Archetype` associated with this data.
     ///
@@ -87,20 +96,6 @@ impl ComponentDescriptor {
     }
 }
 
-impl re_byte_size::SizeBytes for ComponentDescriptor {
-    #[inline]
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            archetype: archetype_name,
-            component,
-            component_type,
-        } = self;
-        archetype_name.heap_size_bytes()
-            + component_type.heap_size_bytes()
-            + component.heap_size_bytes()
-    }
-}
-
 impl ComponentDescriptor {
     /// Creates a new component descriptor that only has the `component` set.
     ///
@@ -166,26 +161,31 @@ pub const FIELD_METADATA_KEY_COMPONENT: &str = "rerun:component";
 /// The key used to identify the [`crate::ComponentType`] in field-level metadata.
 pub const FIELD_METADATA_KEY_COMPONENT_TYPE: &str = "rerun:component_type";
 
-impl From<arrow::datatypes::Field> for ComponentDescriptor {
+impl TryFrom<arrow::datatypes::Field> for ComponentDescriptor {
+    type Error = crate::InvalidComponentIdentifierError;
+
     #[inline]
-    fn from(field: arrow::datatypes::Field) -> Self {
+    fn try_from(field: arrow::datatypes::Field) -> Result<Self, Self::Error> {
         let md = field.metadata();
+
+        let component = md.get(FIELD_METADATA_KEY_COMPONENT).cloned().unwrap_or_else(|| {
+            re_log::debug!(
+                "Missing metadata field {FIELD_METADATA_KEY_COMPONENT}, resorting to field name: {}",
+                field.name()
+            );
+            field.name().clone()
+        });
 
         let descr = Self {
             archetype: md
                 .get(FIELD_METADATA_KEY_ARCHETYPE)
-                .cloned()
-                .map(Into::into),
-            component: md.get(FIELD_METADATA_KEY_COMPONENT).cloned().unwrap_or_else(|| {
-                re_log::debug!("Missing metadata field {FIELD_METADATA_KEY_COMPONENT}, resorting to field name: {}", field.name());
-                field.name().clone()
-            }).into(),
+                .and_then(|s| ArchetypeName::try_new(s).ok()),
+            component: ComponentIdentifier::try_new(component)?,
             component_type: md
                 .get(FIELD_METADATA_KEY_COMPONENT_TYPE)
-                .cloned()
-                .map(Into::into),
+                .and_then(|s| ComponentType::try_new(s).ok()),
         };
         descr.sanity_check();
-        descr
+        Ok(descr)
     }
 }

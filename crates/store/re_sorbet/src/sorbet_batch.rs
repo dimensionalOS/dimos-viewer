@@ -118,7 +118,7 @@ impl SorbetBatch {
 
     /// The columns of the indices (timelines).
     pub fn index_columns(&self) -> impl Iterator<Item = (&IndexColumnDescriptor, &ArrowArrayRef)> {
-        itertools::izip!(self.schema.columns.iter(), self.batch.columns().iter()).filter_map(
+        itertools::izip!(self.schema.columns.iter(), self.batch.columns()).filter_map(
             |(descr, array)| {
                 if let ColumnDescriptor::Time(descr) = descr {
                     Some((descr, array))
@@ -133,7 +133,7 @@ impl SorbetBatch {
     pub fn component_columns(
         &self,
     ) -> impl Iterator<Item = (&ComponentColumnDescriptor, &ArrowArrayRef)> {
-        itertools::izip!(self.schema.columns.iter(), self.batch.columns().iter()).filter_map(
+        itertools::izip!(self.schema.columns.iter(), self.batch.columns()).filter_map(
             |(descr, array)| {
                 if let ColumnDescriptor::Component(descr) = descr {
                     Some((descr, array))
@@ -189,7 +189,6 @@ impl SorbetBatch {
     ///
     /// Non-Rerun metadata will be preserved (both at batch-level and column-level).
     /// Rerun metadata will be updated and added to the batch if needed.
-    #[tracing::instrument(level = "trace", skip_all)]
     pub fn try_from_record_batch(
         batch: &ArrowRecordBatch,
         batch_type: crate::BatchType,

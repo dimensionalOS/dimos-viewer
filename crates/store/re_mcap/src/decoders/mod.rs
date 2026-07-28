@@ -1,3 +1,4 @@
+mod attachments;
 mod metadata;
 mod protobuf;
 mod raw;
@@ -9,10 +10,14 @@ mod stats;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use itertools::Itertools as _;
+#[cfg(not(target_arch = "wasm32"))]
+use re_chunk::RowId;
 use re_chunk::external::nohash_hasher::IntMap;
 use re_chunk::{Chunk, EntityPath};
 use re_log_types::TimeType;
 
+pub use self::attachments::McapAttachmentsDecoder;
 pub use self::metadata::McapMetadataDecoder;
 pub use self::protobuf::McapProtobufDecoder;
 pub use self::raw::McapRawDecoder;
@@ -24,6 +29,10 @@ pub use self::stats::McapStatisticDecoder;
 use crate::Error;
 use crate::parsers::{ChannelId, MessageParser, ParserContext};
 use crate::util::collect_empty_channels;
+
+// Write MCAP file info & stats to a dedicated static entity.
+// This keeps the general RRD `__properties` clean for user-specific property layers.
+const MCAP_PROPERTIES_ENTITY_PATH: &str = "__mcap_properties";
 
 /// Globally unique identifier for a decoder.
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq)]
@@ -63,28 +72,126 @@ pub trait Decoder {
 
     /// The processing that needs to happen for this decoder.
     ///
-    /// This function has access to the entire MCAP file via `mcap_bytes`.
-    ///
-    /// `topic_filter` is provided so per-channel decoders can skip channels
-    /// the user has filtered out. File-level decoders (those that don't iterate
-    /// channels) may ignore it.
-    // TODO(michael): consider introducing a `DecoderContext` for holding the processing context.
+    /// This function has access to all file-level processing inputs via [`DecoderContext`].
     // TODO(#10862): Consider abstracting over `Summary` to allow more convenient / performant indexing.
     // For example, we probably don't want to store the entire file in memory.
     fn process(
         &mut self,
-        mcap_bytes: &[u8],
-        summary: &::mcap::Summary,
-        topic_filter: &TopicFilter,
-        emit: &mut dyn FnMut(Chunk),
+        ctx: &DecoderContext<'_>,
+        emit: &(dyn Fn(Chunk) + Send + Sync),
     ) -> Result<(), Error>;
+}
+
+/// Shared processing context of a decode run.
+pub struct DecoderContext<'a> {
+    mcap_bytes: &'a [u8],
+    summary: &'a ::mcap::Summary,
+    topic_filter: &'a TopicFilter,
+    empty_channels: BTreeSet<ChannelId>,
+}
+
+impl<'a> DecoderContext<'a> {
+    pub fn new(
+        mcap_bytes: &'a [u8],
+        summary: &'a ::mcap::Summary,
+        topic_filter: &'a TopicFilter,
+        empty_channels: BTreeSet<ChannelId>,
+    ) -> Self {
+        Self {
+            mcap_bytes,
+            summary,
+            topic_filter,
+            empty_channels,
+        }
+    }
+
+    pub fn summary(&self) -> &'a ::mcap::Summary {
+        self.summary
+    }
+
+    /// Returns an iterator over all MCAP channels that are relevant for processing
+    /// in this context. I.e. all channels after removing empties, applying filters etc.
+    pub fn relevant_channels(&self) -> impl Iterator<Item = &std::sync::Arc<mcap::Channel<'a>>> {
+        self.summary.channels.values().filter(|channel| {
+            !self.empty_channels.contains(&ChannelId(channel.id))
+                && self.topic_filter.matches(&channel.topic)
+        })
+    }
+
+    /// Iterates metadata records referenced by the summary metadata index.
+    pub fn metadata_records(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &'a mcap::records::MetadataIndex,
+            Result<mcap::records::Metadata, mcap::McapError>,
+        ),
+    > + '_ {
+        self.summary
+            .metadata_indexes
+            .iter()
+            .map(|index| (index, mcap::read::metadata(self.mcap_bytes, index)))
+    }
+
+    /// Iterates attachment records referenced by the summary attachment index.
+    pub fn attachment_records(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &'a mcap::records::AttachmentIndex,
+            Result<mcap::Attachment<'a>, mcap::McapError>,
+        ),
+    > + '_ {
+        self.summary
+            .attachment_indexes
+            .iter()
+            .map(|index| (index, mcap::read::attachment(self.mcap_bytes, index)))
+    }
+}
+
+/// An emitter to use in tests and pass to [`Decoder::process`]
+#[cfg(not(target_arch = "wasm32"))]
+pub struct TestEmitter {
+    rx: std::sync::mpsc::Receiver<Chunk>,
+    emitter: Box<dyn Fn(Chunk) + Send + Sync>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for TestEmitter {
+    fn default() -> Self {
+        #[expect(clippy::disallowed_methods)] // This is intended to use in tests
+        let (tx, rx) = std::sync::mpsc::channel();
+        let emitter = Box::new(move |chunk| {
+            let _res = tx.send(chunk);
+        });
+        Self { rx, emitter }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::ops::Deref for TestEmitter {
+    type Target = dyn Fn(Chunk) + Send + Sync;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.emitter
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TestEmitter {
+    pub fn finish(self) -> Vec<Chunk> {
+        let Self { rx, emitter } = self;
+        drop(emitter);
+        rx.iter().collect()
+    }
 }
 
 /// Can be used to extract per-message information from an MCAP file.
 ///
 /// This is a specialization of [`Decoder`] that allows defining [`MessageParser`]s.
 /// to interpret the contents of MCAP chunks.
-pub trait MessageDecoder {
+pub trait MessageDecoder: Send + Sync {
     fn identifier() -> DecoderIdentifier
     where
         Self: Sized;
@@ -196,7 +303,7 @@ impl TopicFilter {
         self.include = include
             .iter()
             .map(|pattern| regex_lite::Regex::new(pattern))
-            .collect::<Result<Vec<_>, _>>()?;
+            .try_collect()?;
         Ok(self)
     }
 
@@ -204,7 +311,7 @@ impl TopicFilter {
         self.exclude = exclude
             .iter()
             .map(|pattern| regex_lite::Regex::new(pattern))
-            .collect::<Result<Vec<_>, _>>()?;
+            .try_collect()?;
         Ok(self)
     }
 
@@ -224,7 +331,7 @@ impl TopicFilter {
 /// Registry fallback strategy.
 #[derive(Clone, Debug, Default)]
 pub enum Fallback {
-    /// No fallback – channels without a handler are simply unassigned.
+    /// No fallback — channels without a handler are simply unassigned.
     #[default]
     None,
 
@@ -248,21 +355,25 @@ impl MessageDecoderRunner {
         mcap_bytes: &[u8],
         summary: &mcap::Summary,
         time_type: TimeType,
-        emit: &mut dyn FnMut(Chunk),
+        time_range: Option<(u64, u64)>,
+        emit: &(dyn Fn(Chunk) + Send + Sync),
     ) -> Result<(), Error> {
         self.inner.init(summary)?;
 
-        for chunk in &summary.chunk_indexes {
+        let allowed = &self.allowed;
+        let inner = &*self.inner;
+
+        let decode_chunk = |chunk: &::mcap::records::ChunkIndex| -> Result<Vec<Chunk>, Error> {
             let parsers = summary
                 .read_message_indexes(mcap_bytes, chunk)?
                 .iter()
                 .filter_map(|(channel, msg_offsets)| {
                     let channel_id = ChannelId::from(channel.id);
-                    if !self.allowed.contains(&channel_id) {
+                    if !allowed.contains(&channel_id) {
                         return None;
                     }
 
-                    let parser = self.inner.message_parser(channel, msg_offsets.len())?;
+                    let parser = inner.message_parser(channel, msg_offsets.len())?;
                     let entity_path = EntityPath::from(channel.topic.as_str());
                     let ctx = ParserContext::new(entity_path, channel.topic.clone(), time_type);
                     Some((channel_id, (ctx, parser)))
@@ -274,6 +385,12 @@ impl MessageDecoderRunner {
             for msg in summary.stream_chunk(mcap_bytes, chunk)? {
                 match msg {
                     Ok(message) => {
+                        // Skip messages outside the `[start, end)` `log_time` range.
+                        if let Some((start, end)) = time_range
+                            && (message.log_time < start || message.log_time >= end)
+                        {
+                            continue;
+                        }
                         if let Err(err) = decoder.decode_next(&message) {
                             re_log::error_once!(
                                 "Failed to decode message on channel {}: {err}",
@@ -281,28 +398,150 @@ impl MessageDecoderRunner {
                             );
                         }
                     }
-                    Err(err) => re_log::error!("Failed to read message from MCAP file: {err}"),
+                    Err(err) => {
+                        re_log::error!("Failed to read message from MCAP file: {err}");
+                    }
                 }
             }
 
+            let mut batch = Vec::new();
             for mut chunk in decoder.finish() {
                 if let Ok(chunk) = &mut chunk {
-                    chunk.sort_if_unsorted();
-                    for (name, column) in chunk.timelines() {
-                        if !column.is_sorted() {
-                            let entity_path = chunk.entity_path();
-                            re_log::warn_once!(
-                                "Found unsorted timeline '{name}' for entity '{entity_path}'. This may lead to suboptimal performance.",
-                            );
-                        }
-                    }
+                    chunk.sort_by_row_ids_if_needed();
+
+                    // If we hit this warning, we may be producing unnecessarily slow .rrd files.
+                    // See RR-4658 for details.
+                    chunk.warn_if_out_of_order();
                 }
 
                 match chunk {
-                    Ok(c) => emit(c),
+                    Ok(c) => batch.push(c),
                     Err(err) => re_log::error!("Failed to decode chunk: {err}"),
                 }
             }
+
+            Ok(batch)
+        };
+
+        // Drop out-of-range chunks here, *before* `stream_chunk` decompresses them.
+        // Collected into a `Vec` so the parallel path can index a contiguous `0..total`:
+        // its reorder buffer keys on gap-free indices, so skipping inside the worker loop would stall it.
+        let selected: Vec<&::mcap::records::ChunkIndex> = match time_range {
+            Some((start, end)) => summary
+                .chunk_indexes
+                .iter()
+                .filter(|c| c.message_end_time >= start && c.message_start_time < end)
+                .collect(),
+            None => summary.chunk_indexes.iter().collect(),
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = rayon::current_num_threads().max(1);
+
+        if workers <= 2 {
+            // Serial path. Used on wasm32 and on small worker counts.
+            for chunk in selected.iter().copied() {
+                for c in decode_chunk(chunk)? {
+                    emit(c);
+                }
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Count-bounded channel: cap how many decoded batches can sit in the queue ahead of
+            // the consumer. Workers block on `send` once the queue is full, which gives the
+            // reordering time to process.
+            let max_in_flight = workers * 2;
+
+            let (batch_tx, batch_rx) =
+                crossbeam::channel::bounded::<(usize, Vec<Chunk>)>(max_in_flight);
+
+            // Decode chunks in parallel on a producer thread, and re-order them
+            // to be deterministic on another thread.
+            //
+            // Workers pull chunk indices in FIFO order from a shared atomic counter.
+            let (producer_result, ()) = rayon::join(
+                || {
+                    let next_idx = std::sync::atomic::AtomicUsize::new(0);
+                    let total = selected.len();
+                    let chunk_indexes = &selected;
+
+                    let result: Result<(), Error> = std::thread::scope(|scope| {
+                        let handles: Vec<_> = (0..workers)
+                            .map(|_| {
+                                let batch_tx = batch_tx.clone();
+                                let next_idx = &next_idx;
+                                let decode_chunk = &decode_chunk;
+                                scope.spawn(move || -> Result<(), Error> {
+                                    loop {
+                                        let idx = next_idx
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        if idx >= total {
+                                            return Ok(());
+                                        }
+                                        let batch = decode_chunk(chunk_indexes[idx])?;
+                                        // Blocks once `max_in_flight` batches are queued.
+                                        re_quota_channel::send_crossbeam(&batch_tx, (idx, batch))
+                                            .map_err(|err| {
+                                            Error::Other(anyhow::format_err!(
+                                                "Failed to send batch: {err}"
+                                            ))
+                                        })?;
+                                    }
+                                })
+                            })
+                            .collect();
+
+                        let mut first_err: Result<(), Error> = Ok(());
+                        for handle in handles {
+                            match handle.join().expect("decoder worker panicked") {
+                                Err(err) if first_err.is_ok() => first_err = Err(err),
+                                Ok(()) | Err(_) => {}
+                            }
+                        }
+                        first_err
+                    });
+                    // Close the channel so the consumer's iteration terminates.
+                    drop(batch_tx);
+                    result
+                },
+                || {
+                    // Re-create `RowId`s on this single thread so they are monotonically
+                    // increasing in emission order. Workers generate `RowId`s from
+                    // thread-local counters that are not comparable across threads.
+                    let emit_with_new_row_ids = |chunk: Chunk| {
+                        let chunk = chunk.clone_as(chunk.id(), RowId::new());
+                        emit(chunk);
+                    };
+
+                    let mut buffer: BTreeMap<usize, Vec<Chunk>> = BTreeMap::new();
+                    let mut current_idx = 0usize;
+                    for (idx, batch) in &batch_rx {
+                        if idx == current_idx {
+                            for chunk in batch {
+                                emit_with_new_row_ids(chunk);
+                            }
+                            current_idx += 1;
+                            while let Some(b) = buffer.remove(&current_idx) {
+                                for chunk in b {
+                                    emit_with_new_row_ids(chunk);
+                                }
+                                current_idx += 1;
+                            }
+                        } else {
+                            buffer.insert(idx, batch);
+                        }
+                    }
+
+                    re_log::debug_assert!(buffer.is_empty(), "All batches should've been consumed");
+                },
+            );
+
+            producer_result?;
         }
 
         Ok(())
@@ -325,22 +564,46 @@ pub struct ExecutionPlan {
     pub runners: Vec<MessageDecoderRunner>,
     pub assignments: Vec<DecoderAssignment>,
     pub topic_filter: TopicFilter,
+
+    /// Optional `[start, end)` `log_time` range (nanoseconds). When set, chunks and messages
+    /// whose `log_time` falls outside the range are skipped; chunks that fall entirely outside
+    /// are never decompressed, so this bounds peak memory and not just output.
+    pub time_range: Option<(u64, u64)>,
 }
 
 impl ExecutionPlan {
+    /// Restrict decoding to messages whose MCAP `log_time` falls in `[start, end)` (nanoseconds).
+    ///
+    /// Chunks whose index bounds fall entirely outside the range are skipped before decompression.
+    /// `None` clears the filter (decode everything).
+    #[inline]
+    pub fn with_time_range(mut self, time_range: Option<(u64, u64)>) -> Self {
+        self.time_range = time_range;
+        self
+    }
+
     pub fn run(
         mut self,
         mcap_bytes: &[u8],
         summary: &mcap::Summary,
         time_type: TimeType,
-        emit: &mut dyn FnMut(Chunk),
+        emit: &(dyn Fn(Chunk) + Send + Sync),
     ) -> anyhow::Result<()> {
+        let empty_channels = collect_empty_channels(mcap_bytes, summary)?;
+        let ctx = DecoderContext::new(mcap_bytes, summary, &self.topic_filter, empty_channels);
+
         for mut decoder in self.file_decoders {
-            decoder.process(mcap_bytes, summary, &self.topic_filter, emit)?;
+            decoder.process(&ctx, emit)?;
         }
 
+        let time_range = self.time_range;
+        if let Some((start, end)) = time_range {
+            re_log::info!(
+                "Filtering MCAP messages to log_time range [{start}, {end}) (nanoseconds)"
+            );
+        }
         for runner in &mut self.runners {
-            runner.process(mcap_bytes, summary, time_type, emit)?;
+            runner.process(mcap_bytes, summary, time_type, time_range, emit)?;
         }
         Ok(())
     }
@@ -380,6 +643,7 @@ impl DecoderRegistry {
         let mut registry = Self::empty()
             // file decoders:
             .register_file_decoder::<McapRecordingInfoDecoder>()
+            .register_file_decoder::<McapAttachmentsDecoder>()
             .register_file_decoder::<McapMetadataDecoder>()
             .register_file_decoder::<McapSchemaDecoder>()
             .register_file_decoder::<McapStatisticDecoder>()
@@ -435,9 +699,7 @@ impl DecoderRegistry {
 
     /// Returns all registered decoder identifiers (file + message) as strings.
     pub fn all_identifiers(&self) -> Vec<String> {
-        self.file_factories
-            .keys()
-            .chain(self.msg_factories.keys())
+        std::iter::chain(self.file_factories.keys(), self.msg_factories.keys())
             .map(|id| id.to_string())
             .collect()
     }
@@ -524,6 +786,14 @@ impl DecoderRegistry {
                 continue;
             }
 
+            if !topic_filter.matches(&channel.topic) {
+                re_log::debug!(
+                    "Skipping MCAP channel '{}' because it does not match the topic filter.",
+                    channel.topic,
+                );
+                continue;
+            }
+
             if channel.message_encoding.trim().is_empty() {
                 re_log::warn_once!(
                     "MCAP channel '{}' does not specify a message encoding.",
@@ -531,12 +801,11 @@ impl DecoderRegistry {
                 );
             }
 
-            if !topic_filter.matches(&channel.topic) {
-                re_log::debug!(
-                    "Skipping MCAP channel '{}' because it does not match the topic filter.",
+            if channel.schema.is_none() {
+                re_log::warn!(
+                    "MCAP channel '{}' does not specify a schema.",
                     channel.topic,
                 );
-                continue;
             }
 
             // explicit priority order
@@ -598,6 +867,7 @@ impl DecoderRegistry {
             runners,
             assignments,
             topic_filter: topic_filter.clone(),
+            time_range: None,
         })
     }
 }
@@ -606,7 +876,6 @@ impl DecoderRegistry {
 mod tests {
     use std::io;
 
-    use re_chunk::Chunk;
     use re_log_types::TimeType;
     use re_sdk_types::archetypes::McapMessage;
 
@@ -653,11 +922,11 @@ mod tests {
         assert_eq!(plan.assignments[0].channel_id, ChannelId(active_channel_id));
         assert_ne!(plan.assignments[0].channel_id, ChannelId(empty_channel_id));
 
-        let mut chunks = Vec::<Chunk>::new();
-        plan.run(&buffer, &summary, TimeType::TimestampNs, &mut |chunk| {
-            chunks.push(chunk);
-        })
-        .expect("failed to run plan");
+        let emitter = TestEmitter::default();
+        plan.run(&buffer, &summary, TimeType::TimestampNs, &*emitter)
+            .expect("failed to run plan");
+
+        let chunks = emitter.finish();
 
         assert_eq!(chunks.len(), 2);
         assert!(
@@ -669,6 +938,173 @@ mod tests {
             chunks
                 .iter()
                 .any(|chunk| chunk.entity_path().to_string().ends_with("active_topic"))
+        );
+    }
+
+    /// Writes one raw-channel message per entry in `log_times`. When `chunk_per_message` is set,
+    /// each message is flushed into its own MCAP chunk (distinct chunk-index time bounds); otherwise
+    /// all messages share a single chunk (used to exercise per-message, within-chunk filtering).
+    fn raw_summary_with_log_times(
+        log_times: &[u64],
+        chunk_per_message: bool,
+    ) -> (mcap::Summary, Vec<u8>) {
+        let cursor = io::Cursor::new(Vec::new());
+        let mut writer = mcap::Writer::new(cursor).expect("failed to create writer");
+        let channel_id = writer
+            .add_channel(0, "topic", "raw", &Default::default())
+            .expect("failed to add channel");
+
+        for (seq, &log_time) in log_times.iter().enumerate() {
+            writer
+                .write_to_known_channel(
+                    &mcap::records::MessageHeader {
+                        channel_id,
+                        sequence: seq as u32,
+                        log_time,
+                        publish_time: log_time,
+                    },
+                    &[1, 2, 3],
+                )
+                .expect("failed to write message");
+            if chunk_per_message {
+                writer.flush().expect("failed to flush chunk");
+            }
+        }
+
+        let summary = writer.finish().expect("failed to finish writer");
+        let buffer = writer.into_inner().into_inner();
+        (summary, buffer)
+    }
+
+    /// Collects the `message_log_time` values from `chunks`, in emission order.
+    fn emitted_log_times(chunks: &[Chunk]) -> Vec<i64> {
+        let mut times = Vec::new();
+        for chunk in chunks {
+            for (name, time_column) in chunk.timelines() {
+                if name.as_str() == "message_log_time" {
+                    times.extend_from_slice(time_column.times_raw());
+                }
+            }
+        }
+        times
+    }
+
+    fn run_with_time_range(
+        buffer: &[u8],
+        summary: &mcap::Summary,
+        time_range: Option<(u64, u64)>,
+    ) -> Vec<i64> {
+        let plan = DecoderRegistry::all_with_raw_fallback()
+            .plan(buffer, summary, &TopicFilter::default())
+            .expect("failed to plan")
+            .with_time_range(time_range);
+        let emitter = TestEmitter::default();
+        plan.run(buffer, summary, TimeType::TimestampNs, &*emitter)
+            .expect("failed to run plan");
+        emitted_log_times(&emitter.finish())
+    }
+
+    #[test]
+    fn time_range_skips_out_of_range_chunks() {
+        let (summary, buffer) = raw_summary_with_log_times(&[10, 20, 30], true);
+        // Sanity: each message landed in its own chunk, so filtering happens at the chunk level.
+        assert_eq!(summary.chunk_indexes.len(), 3);
+
+        // No range and a fully-covering range are equivalent to decoding everything.
+        assert_eq!(
+            run_with_time_range(&buffer, &summary, None),
+            vec![10, 20, 30]
+        );
+        assert_eq!(
+            run_with_time_range(&buffer, &summary, Some((0, u64::MAX))),
+            vec![10, 20, 30]
+        );
+        // Half-open `[start, end)`: 15..25 keeps only 20.
+        assert_eq!(
+            run_with_time_range(&buffer, &summary, Some((15, 25))),
+            vec![20]
+        );
+        // Inclusive start, exclusive end: [20, 30) keeps 20 but not 30.
+        assert_eq!(
+            run_with_time_range(&buffer, &summary, Some((20, 30))),
+            vec![20]
+        );
+        // A range that overlaps no chunk yields nothing.
+        assert_eq!(
+            run_with_time_range(&buffer, &summary, Some((100, 200))),
+            Vec::<i64>::new()
+        );
+    }
+
+    #[test]
+    fn time_range_drops_messages_within_a_straddling_chunk() {
+        let (summary, buffer) = raw_summary_with_log_times(&[10, 20, 30], false);
+        // Sanity: a single chunk straddles the requested range, so the per-message check runs.
+        assert_eq!(summary.chunk_indexes.len(), 1);
+
+        assert_eq!(
+            run_with_time_range(&buffer, &summary, Some((15, 25))),
+            vec![20]
+        );
+    }
+
+    #[test]
+    fn time_range_serial_and_parallel_paths_agree() {
+        // Enough single-message chunks to exercise the parallel reorder buffer.
+        let log_times: Vec<u64> = (0..64).map(|i| i * 10).collect();
+        let (summary, buffer) = raw_summary_with_log_times(&log_times, true);
+        assert_eq!(summary.chunk_indexes.len(), 64);
+
+        // `workers = current_num_threads()`, so a 1-thread pool forces the serial path and a
+        // larger pool forces the parallel reorder path. Both must emit the same in-range messages
+        // in the same order (RowId is regenerated on the parallel path, so we compare times only).
+        let run_in_pool = |threads: usize, time_range: Option<(u64, u64)>| -> Vec<i64> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("failed to build thread pool");
+            pool.install(|| run_with_time_range(&buffer, &summary, time_range))
+        };
+
+        let filter = Some((100, 500));
+        let expected: Vec<i64> = (100..500).step_by(10).collect();
+
+        let serial = run_in_pool(1, filter);
+        let parallel = run_in_pool(4, filter);
+
+        assert_eq!(serial, expected);
+        assert_eq!(parallel, expected);
+        assert_eq!(serial, parallel);
+    }
+
+    #[test]
+    fn emits_file_level_and_message_content() {
+        let (summary, buffer) = raw_summary_with_log_times(&[10, 20, 30], false);
+
+        let plan = DecoderRegistry::all_with_raw_fallback()
+            .plan(&buffer, &summary, &TopicFilter::default())
+            .expect("failed to plan");
+        let emitter = TestEmitter::default();
+        plan.run(&buffer, &summary, TimeType::TimestampNs, &*emitter)
+            .expect("failed to run plan");
+        let chunks = emitter.finish();
+
+        // Per-message data is emitted.
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.entity_path().to_string().ends_with("topic")),
+            "per-message data should be emitted"
+        );
+
+        // File-level (static, whole-file) content — e.g. the MCAP-properties entity — is emitted.
+        assert!(
+            chunks.iter().any(|c| {
+                c.entity_path()
+                    .to_string()
+                    .contains(MCAP_PROPERTIES_ENTITY_PATH)
+            }),
+            "file-level content should be emitted"
         );
     }
 
@@ -728,17 +1164,82 @@ mod tests {
             .expect("missing assignment");
         assert_eq!(assignment.decoder.to_string(), "raw");
 
-        let mut chunks = Vec::<Chunk>::new();
-        plan.run(&buffer, &summary, TimeType::TimestampNs, &mut |chunk| {
-            chunks.push(chunk);
-        })
-        .expect("failed to run plan");
+        let test_emitter = TestEmitter::default();
+        plan.run(&buffer, &summary, TimeType::TimestampNs, &*test_emitter)
+            .expect("failed to run plan");
+
+        let chunks = test_emitter.finish();
 
         assert!(chunks.iter().any(|chunk| {
             chunk.entity_path().to_string().ends_with("non_cdr_topic")
                 && chunk
                     .component_descriptors()
                     .any(|descr| descr.component == McapMessage::descriptor_data().component)
+        }));
+    }
+
+    /// Tests that an MCAP channel payload without schema is passed through as raw blob (with a warning).
+    #[test]
+    fn schema_less_channel_is_forwarded_as_raw_blob() {
+        let (summary, buffer) = {
+            let cursor = io::Cursor::new(Vec::new());
+            let mut writer = mcap::Writer::new(cursor).expect("failed to create writer");
+
+            let channel_id = writer
+                .add_channel(0, "schema_less_topic", "raw", &Default::default())
+                .expect("failed to add channel");
+
+            writer
+                .write_to_known_channel(
+                    &mcap::records::MessageHeader {
+                        channel_id,
+                        sequence: 0,
+                        log_time: 1,
+                        publish_time: 2,
+                    },
+                    &[1, 2, 3],
+                )
+                .expect("failed to write message");
+
+            let summary = writer.finish().expect("failed to finish writer");
+            let buffer = writer.into_inner().into_inner();
+            (summary, buffer)
+        };
+
+        let plan = DecoderRegistry::all_with_raw_fallback()
+            .plan(&buffer, &summary, &TopicFilter::default())
+            .expect("failed to plan");
+
+        let assignment = plan
+            .assignments
+            .iter()
+            .find(|assignment| assignment.topic == "schema_less_topic")
+            .expect("missing assignment");
+        assert_eq!(assignment.schema_name, None);
+        assert_eq!(assignment.decoder.to_string(), "raw");
+
+        let test_emitter = TestEmitter::default();
+        plan.run(&buffer, &summary, TimeType::TimestampNs, &*test_emitter)
+            .expect("failed to run plan");
+
+        let chunks = test_emitter.finish();
+        assert!(chunks.iter().any(|chunk| {
+            chunk
+                .entity_path()
+                .to_string()
+                .ends_with("schema_less_topic")
+                && chunk.num_rows() == 1
+                && chunk
+                    .component_descriptors()
+                    .any(|descr| descr.component == McapMessage::descriptor_data().component)
+                && chunk
+                    .timelines()
+                    .values()
+                    .any(|timeline| timeline.name() == "message_log_time")
+                && chunk
+                    .timelines()
+                    .values()
+                    .any(|timeline| timeline.name() == "message_publish_time")
         }));
     }
 
@@ -762,6 +1263,36 @@ mod tests {
             .find(|assignment| assignment.topic == "non_cdr_string_topic")
             .expect("missing assignment");
         assert_eq!(assignment.decoder.to_string(), "raw");
+    }
+
+    /// Tests that standard ROS 2 schemas prefer semantic decoding by default and support reflection-only selection.
+    #[test]
+    fn standard_ros2_schema_respects_decoder_selection() {
+        let (summary, buffer) = ros2_summary_with_message_encoding(
+            "sensor_msgs/msg/Imu",
+            "imu_topic",
+            "cdr",
+            &[0, 1, 0, 0],
+        );
+
+        // In the default set of decoders, `sensor_msgs/msgs/Imu` is assigned to the semantic `ros2msg`.
+        let default_plan = DecoderRegistry::all_with_raw_fallback()
+            .plan(&buffer, &summary, &TopicFilter::default())
+            .expect("failed to plan");
+        assert_eq!(default_plan.assignments[0].decoder.to_string(), "ros2msg");
+
+        // If only `ros2_reflection` is selected, it shall run reflection for _all_ ROS messages including
+        // ones supported by `ros2msg` (i.e. also the IMU message here), and not fall back to `raw`.
+        let selected =
+            SelectedDecoders::Subset(BTreeSet::from([DecoderIdentifier::from("ros2_reflection")]));
+        let reflection_plan = DecoderRegistry::all_with_raw_fallback()
+            .select(&selected)
+            .plan(&buffer, &summary, &TopicFilter::default())
+            .expect("failed to plan");
+        assert_eq!(
+            reflection_plan.assignments[0].decoder.to_string(),
+            "ros2_reflection"
+        );
     }
 
     #[test]

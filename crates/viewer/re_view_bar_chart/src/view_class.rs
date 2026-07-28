@@ -1,5 +1,6 @@
 use ahash::HashMap;
 use egui::NumExt as _;
+use itertools::izip;
 use re_log_types::{EntityPath, EntityPathHash};
 use re_sdk_types::blueprint::archetypes::{PlotBackground, PlotLegend};
 use re_sdk_types::blueprint::components::{Corner2D, Enabled};
@@ -165,20 +166,15 @@ impl ViewClass for BarChartView {
 
         let state = state.downcast_mut::<()>()?;
 
-        let blueprint_db = ctx.blueprint_db();
         let view_id = query.view_id;
 
         let charts = system_output
-            .visualizer_data::<std::collections::BTreeMap<EntityPath, BarChartData>>(
+            .visualizer_data_or_default::<std::collections::BTreeMap<EntityPath, BarChartData>>(
                 BarChartVisualizerSystem::identifier(),
             )?;
 
         let ctx = self.view_context(ctx, view_id, state, query.space_origin);
-        let background = ViewProperty::from_archetype::<PlotBackground>(
-            blueprint_db,
-            ctx.blueprint_query(),
-            view_id,
-        );
+        let background = ViewProperty::from_archetype::<PlotBackground>(&ctx);
         let background_color = background
             .component_or_fallback::<Color>(&ctx, PlotBackground::descriptor_color().component)?;
         let show_grid = background.component_or_fallback::<Enabled>(
@@ -186,11 +182,7 @@ impl ViewClass for BarChartView {
             PlotBackground::descriptor_show_grid().component,
         )?;
 
-        let plot_legend = ViewProperty::from_archetype::<PlotLegend>(
-            blueprint_db,
-            ctx.blueprint_query(),
-            view_id,
-        );
+        let plot_legend = ViewProperty::from_archetype::<PlotLegend>(&ctx);
         let legend_visible: Visible =
             plot_legend.component_or_fallback(&ctx, PlotLegend::descriptor_visible().component)?;
         let legend_corner: Corner2D =
@@ -230,7 +222,7 @@ impl ViewClass for BarChartView {
                     color,
                     widths,
                 },
-            ) in charts
+            ) in charts.iter()
             {
                 let arg: ::arrow::buffer::ScalarBuffer<f64> = match &abscissa.buffer {
                     TensorBuffer::U8(data) => data.iter().map(|v| *v as f64).collect(),
@@ -261,11 +253,8 @@ impl ViewClass for BarChartView {
                 };
 
                 let egui_color: egui::Color32 = color.0.into();
-                let bars: Vec<(f64, f64, f64)> = arg
-                    .iter()
-                    .zip(widths.iter())
-                    .zip(data.iter())
-                    .map(|((index, width), value)| {
+                let bars: Vec<(f64, f64, f64)> = izip!(&arg, widths, &data)
+                    .map(|(index, width, value)| {
                         let center_x = index + (0.5 * *width as f64);
                         (center_x, *width as f64, *value)
                     })

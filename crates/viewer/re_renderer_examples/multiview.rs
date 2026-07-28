@@ -33,7 +33,7 @@ fn build_mesh_instances(
         .chunks_exact(model_mesh_instances.len())
         .enumerate()
         .flat_map(|(i, positions_and_colors)| {
-            model_mesh_instances.iter().zip(positions_and_colors).map(
+            std::iter::zip(model_mesh_instances, positions_and_colors).map(
                 move |(model_mesh_instances, (p, c))| GpuMeshInstance {
                     gpu_mesh: model_mesh_instances.gpu_mesh.clone(),
                     world_from_mesh: glam::Affine3A::from_scale_rotation_translation(
@@ -222,7 +222,11 @@ impl Multiview {
         draw_data: D,
         index: u32,
     ) -> anyhow::Result<(ViewBuilder, wgpu::CommandBuffer)> {
-        let mut view_builder = ViewBuilder::new(re_ctx, target_cfg)?;
+        let mut view_builder = ViewBuilder::new(
+            re_ctx,
+            target_cfg,
+            re_renderer::ViewBuilderId::new(index.into()),
+        )?;
 
         if self
             .take_screenshot_next_frame_for_view

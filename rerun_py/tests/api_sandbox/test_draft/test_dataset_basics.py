@@ -33,10 +33,10 @@ def test_dataset_basics(complex_dataset_prefix: Path) -> None:
 
         assert segment_df.schema().to_string(show_field_metadata=False) == inline_snapshot("""\
 rerun_segment_id: string not null
-rerun_layer_names: list<rerun_layer_names: string not null> not null
-  child 0, rerun_layer_names: string not null
-rerun_storage_urls: list<rerun_storage_urls: string not null> not null
-  child 0, rerun_storage_urls: string not null
+rerun_layer_names: list<item: string not null> not null
+  child 0, item: string not null
+rerun_storage_urls: list<item: string not null> not null
+  child 0, item: string not null
 rerun_last_updated_at: timestamp[ns] not null
 rerun_num_chunks: uint64 not null
 rerun_size_bytes: uint64 not null
@@ -59,30 +59,30 @@ sorbet:version: '0.1.3'\
                 "rerun_size_bytes",
             ).sort("rerun_segment_id")
         ) == inline_snapshot("""\
-┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ METADATA:                                                                                                                                                        │
-│ * version: 0.1.3                                                                                                                                                 │
-├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
-│ ┌─────────────────────┬────────────────────────────────────────────────────────────────┬───────────────────────┬───────────────────────┬───────────────────────┐ │
-│ │ rerun_segment_id    ┆ rerun_layer_names                                              ┆ rerun_num_chunks      ┆ timeline:end          ┆ timeline:start        │ │
-│ │ ---                 ┆ ---                                                            ┆ ---                   ┆ ---                   ┆ ---                   │ │
-│ │ type: non-null Utf8 ┆ type: non-null List(non-null Utf8, field: 'rerun_layer_names') ┆ type: non-null UInt64 ┆ type: Timestamp(ns)   ┆ type: Timestamp(ns)   │ │
-│ │                     ┆                                                                ┆                       ┆ index: timeline       ┆ index: timeline       │ │
-│ │                     ┆                                                                ┆                       ┆ index_kind: timestamp ┆ index_kind: timestamp │ │
-│ │                     ┆                                                                ┆                       ┆ index_marker: end     ┆ index_marker: start   │ │
-│ │                     ┆                                                                ┆                       ┆ kind: index           ┆ kind: index           │ │
-│ ╞═════════════════════╪════════════════════════════════════════════════════════════════╪═══════════════════════╪═══════════════════════╪═══════════════════════╡ │
-│ │ complex_recording_0 ┆ [base]                                                         ┆ 3                     ┆ 2000-01-01T00:00:02   ┆ 2000-01-01T00:00:00   │ │
-│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
-│ │ complex_recording_1 ┆ [base]                                                         ┆ 3                     ┆ 2000-01-01T00:00:03   ┆ 2000-01-01T00:00:01   │ │
-│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
-│ │ complex_recording_2 ┆ [base]                                                         ┆ 3                     ┆ 2000-01-01T00:00:04   ┆ 2000-01-01T00:00:02   │ │
-│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
-│ │ complex_recording_3 ┆ [base]                                                         ┆ 3                     ┆ 2000-01-01T00:00:05   ┆ 2000-01-01T00:00:03   │ │
-│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
-│ │ complex_recording_4 ┆ [base]                                                         ┆ 3                     ┆ 2000-01-01T00:00:06   ┆ 2000-01-01T00:00:04   │ │
-│ └─────────────────────┴────────────────────────────────────────────────────────────────┴───────────────────────┴───────────────────────┴───────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ METADATA:                                                                                                                            │
+│ * version: 0.1.3                                                                                                                     │
+├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+│ ┌─────────────────────┬────────────────────────────────────┬───────────────────────┬───────────────────────┬───────────────────────┐ │
+│ │ rerun_segment_id    ┆ rerun_layer_names                  ┆ rerun_num_chunks      ┆ timeline:end          ┆ timeline:start        │ │
+│ │ ---                 ┆ ---                                ┆ ---                   ┆ ---                   ┆ ---                   │ │
+│ │ type: non-null Utf8 ┆ type: non-null List(non-null Utf8) ┆ type: non-null UInt64 ┆ type: Timestamp(ns)   ┆ type: Timestamp(ns)   │ │
+│ │                     ┆                                    ┆                       ┆ index: timeline       ┆ index: timeline       │ │
+│ │                     ┆                                    ┆                       ┆ index_kind: timestamp ┆ index_kind: timestamp │ │
+│ │                     ┆                                    ┆                       ┆ index_marker: end     ┆ index_marker: start   │ │
+│ │                     ┆                                    ┆                       ┆ kind: index           ┆ kind: index           │ │
+│ ╞═════════════════════╪════════════════════════════════════╪═══════════════════════╪═══════════════════════╪═══════════════════════╡ │
+│ │ complex_recording_0 ┆ [base]                             ┆ 3                     ┆ 2000-01-01T00:00:02   ┆ 2000-01-01T00:00:00   │ │
+│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
+│ │ complex_recording_1 ┆ [base]                             ┆ 3                     ┆ 2000-01-01T00:00:03   ┆ 2000-01-01T00:00:01   │ │
+│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
+│ │ complex_recording_2 ┆ [base]                             ┆ 3                     ┆ 2000-01-01T00:00:04   ┆ 2000-01-01T00:00:02   │ │
+│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
+│ │ complex_recording_3 ┆ [base]                             ┆ 3                     ┆ 2000-01-01T00:00:05   ┆ 2000-01-01T00:00:03   │ │
+│ ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤ │
+│ │ complex_recording_4 ┆ [base]                             ┆ 3                     ┆ 2000-01-01T00:00:06   ┆ 2000-01-01T00:00:04   │ │
+│ └─────────────────────┴────────────────────────────────────┴───────────────────────┴───────────────────────┴───────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\
 """)
 
 
@@ -93,10 +93,10 @@ def test_dataset_register(rrd_paths: list[Path]) -> None:
         ds = client.create_dataset("dataset")
 
         # Single RRD, default layer name
-        ds.register(rrd_paths[0].as_uri()).wait()
+        ds.register([rrd_paths[0].as_uri()]).wait()
 
         # Single RRD, override layer name
-        ds.register(rrd_paths[1].as_uri(), layer_name="extra").wait()
+        ds.register([rrd_paths[1].as_uri()], layer_name="extra").wait()
 
         # Multiple RRDs, multiple layer names
         ds.register([p.as_uri() for p in rrd_paths[2:4]], layer_name=["fiz", "fuz"]).wait()
@@ -107,7 +107,7 @@ def test_dataset_register(rrd_paths: list[Path]) -> None:
         with pytest.raises(ValueError):
             ds.register([p.as_uri() for p in rrd_paths], layer_name=["not", "enough"]).wait()
 
-        df = ds.manifest().select("rerun_layer_name", "rerun_segment_id").sort("rerun_layer_name", "rerun_segment_id")
+        df = ds._manifest().select("rerun_layer_name", "rerun_segment_id").sort("rerun_layer_name", "rerun_segment_id")
         df_schema = df.schema()
         for batch in df.collect():
             assert batch.schema.equals(df_schema, check_metadata=True)
@@ -269,19 +269,19 @@ def test_dataset_metadata(complex_dataset_prefix: Path) -> None:
 
 
 def test_manifest_diagnostic_data(complex_dataset_prefix: Path) -> None:
-    """Test the include_diagnostic_data parameter on manifest()."""
+    """Test the include_diagnostic_data parameter on _manifest()."""
     with rr.server.Server() as server:
         client = server.client()
         ds = client.create_dataset("dataset")
         ds.register_prefix(complex_dataset_prefix.as_uri()).wait()
 
         # Default: rerun_registration_status column should not be present
-        manifest = ds.manifest()
+        manifest = ds._manifest()
         column_names = [f.name for f in manifest.schema()]
         assert "rerun_registration_status" not in column_names
 
         # With include_diagnostic_data=True: column should be present
-        manifest_diag = ds.manifest(include_diagnostic_data=True)
+        manifest_diag = ds._manifest(include_diagnostic_data=True)
         column_names_diag = [f.name for f in manifest_diag.schema()]
         assert "rerun_registration_status" in column_names_diag
 

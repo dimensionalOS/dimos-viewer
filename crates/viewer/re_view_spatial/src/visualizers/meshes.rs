@@ -62,7 +62,7 @@ impl Mesh3DVisualizer {
                 };
 
                 c.entry(
-                    &entity_path.to_string(),
+                    entity_path,
                     key.clone(),
                     AnyMesh::Mesh {
                         mesh: mesh_entry.native_mesh,
@@ -93,7 +93,7 @@ impl Mesh3DVisualizer {
                         }
                     }));
 
-                    data.add_bounding_box(entity_path.hash(), mesh.bbox(), world_from_instance);
+                    data.add_bounding_box_3d(entity_path.hash(), mesh.bbox(), world_from_instance);
                 }
             }
         }
@@ -102,7 +102,10 @@ impl Mesh3DVisualizer {
 
 impl IdentifiedViewSystem for Mesh3DVisualizer {
     fn identifier() -> re_viewer_context::ViewSystemIdentifier {
-        "Mesh3D".into()
+        re_viewer_context::external::re_string_interner::intern_static!(
+            re_viewer_context::ViewSystemIdentifier,
+            "Mesh3D"
+        )
     }
 }
 

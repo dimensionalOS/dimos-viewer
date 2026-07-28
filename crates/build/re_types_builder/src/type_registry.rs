@@ -114,22 +114,24 @@ impl TypeRegistry {
 
             // NOTE: Inject the null markers' field first and foremost! That way it is
             // guaranteed to be stable and forward-compatible.
-            let fields = std::iter::once(LazyField {
-                name: "_null_markers".into(),
-                data_type: AtomicDataType::Null.into(),
-                // NOTE: The spec doesn't allow a `Null` array to be non-nullable. Not that
-                // we care either way.
-                is_nullable: true,
-                metadata: Default::default(),
-            })
-            .chain(obj.fields.iter_mut().map(|field| LazyField {
-                name: field.name.clone(),
-                data_type: self.arrow_datatype_from_type(field.typ.clone(), field),
-                // NOTE: The spec doesn't allow a `Null` array to be non-nullable.
-                // We map Unit -> Null in enum fields, so this must be nullable.
-                is_nullable: field.typ == Type::Unit,
-                metadata: Default::default(),
-            }))
+            let fields = std::iter::chain(
+                std::iter::once(LazyField {
+                    name: "_null_markers".into(),
+                    data_type: AtomicDataType::Null.into(),
+                    // NOTE: The spec doesn't allow a `Null` array to be non-nullable. Not that
+                    // we care either way.
+                    is_nullable: true,
+                    metadata: Default::default(),
+                }),
+                obj.fields.iter_mut().map(|field| LazyField {
+                    name: field.name.clone(),
+                    data_type: self.arrow_datatype_from_type(field.typ.clone(), field),
+                    // NOTE: The spec doesn't allow a `Null` array to be non-nullable.
+                    // We map Unit -> Null in enum fields, so this must be nullable.
+                    is_nullable: field.typ == Type::Unit,
+                    metadata: Default::default(),
+                }),
+            )
             .collect();
 
             LazyDatatype::Object {
@@ -166,7 +168,7 @@ impl TypeRegistry {
             Type::Array { elem_type, length } => LazyDatatype::FixedSizeList(
                 LazyField {
                     name: "item".into(),
-                    data_type: self.arrow_datatype_from_element_type(elem_type),
+                    data_type: Self::arrow_datatype_from_element_type(elem_type),
                     // NOTE: Do _not_ confuse this with the nullability of the field itself!
                     // This would be the nullability of the elements of the list itself, which our IDL
                     // literally is unable to express at the moment, so you can be certain this is
@@ -180,7 +182,7 @@ impl TypeRegistry {
             Type::Vector { elem_type } => LazyDatatype::List(
                 LazyField {
                     name: "item".into(),
-                    data_type: self.arrow_datatype_from_element_type(elem_type),
+                    data_type: Self::arrow_datatype_from_element_type(elem_type),
                     // NOTE: Do _not_ confuse this with the nullability of the field itself!
                     // This would be the nullability of the elements of the list itself, which our IDL
                     // literally is unable to express at the moment, so you can be certain this is
@@ -199,8 +201,7 @@ impl TypeRegistry {
         datatype
     }
 
-    fn arrow_datatype_from_element_type(&self, typ: ElementType) -> LazyDatatype {
-        _ = self;
+    fn arrow_datatype_from_element_type(typ: ElementType) -> LazyDatatype {
         match typ {
             ElementType::UInt8 => LazyDatatype::Atomic(AtomicDataType::UInt8),
             ElementType::UInt16 => LazyDatatype::Atomic(AtomicDataType::UInt16),
@@ -217,6 +218,16 @@ impl TypeRegistry {
             ElementType::Binary => LazyDatatype::Binary,
             ElementType::String => LazyDatatype::Utf8,
             ElementType::Object { fqname } => LazyDatatype::Unresolved { fqname },
+            ElementType::Array { elem_type, length } => LazyDatatype::FixedSizeList(
+                LazyField {
+                    name: "item".into(),
+                    data_type: Self::arrow_datatype_from_element_type(*elem_type),
+                    is_nullable: false,
+                    metadata: Default::default(),
+                }
+                .into(),
+                length,
+            ),
         }
     }
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ahash::HashMap;
 use parking_lot::{ArcRwLockReadGuard, RawRwLock, RwLock};
-use re_byte_size::SizeBytes;
+use re_byte_size::SizeBytes as _;
 use re_chunk_store::ChunkStore;
 use re_entity_db::EntityDb;
 use re_log::{debug_assert, debug_assert_eq};
@@ -36,6 +36,7 @@ type ArcRwLock<T> = Arc<RwLock<T>>;
 /// * [`archetypes::InstancePoses3D`]
 ///   Instance poses that should be applied to the tree transforms (via [`crate::TransformForest`]) but not propagate.
 ///   Also unlike tree transforms, these are not associated with transform frames but rather with entity paths.
+#[derive(re_byte_size::SizeBytes)]
 pub struct TransformResolutionCache {
     /// The frame id registry is co-located in the resolution cache for convenience:
     /// the resolution cache is often the lowest level of transform access and
@@ -97,22 +98,6 @@ impl TransformResolutionCache {
     }
 }
 
-impl SizeBytes for TransformResolutionCache {
-    fn heap_size_bytes(&self) -> u64 {
-        re_tracing::profile_function!();
-
-        let Self {
-            frame_id_registry,
-            per_timeline,
-            static_timeline,
-        } = self;
-
-        frame_id_registry.heap_size_bytes()
-            + per_timeline.heap_size_bytes()
-            + static_timeline.heap_size_bytes()
-    }
-}
-
 impl re_byte_size::MemUsageTreeCapture for TransformResolutionCache {
     fn capture_mem_usage_tree(&self) -> re_byte_size::MemUsageTree {
         re_tracing::profile_function!();
@@ -147,12 +132,17 @@ impl TransformResolutionCache {
     }
 
     /// Accesses the transform component tracking data for a given timeline.
+    ///
+    /// A `None` timeline (a static-only query) yields the static transforms.
     #[inline]
     pub fn transforms_for_timeline(
         &self,
-        timeline: TimelineName,
+        timeline: impl Into<Option<TimelineName>>,
     ) -> ArcRwLockReadGuard<RawRwLock, CachedTransformsForTimeline> {
-        if let Some(per_timeline) = self.per_timeline.get(&timeline) {
+        if let Some(per_timeline) = timeline
+            .into()
+            .and_then(|timeline| self.per_timeline.get(&timeline))
+        {
             per_timeline.read_arc()
         } else {
             self.static_timeline.read_arc()
@@ -294,7 +284,7 @@ impl TransformResolutionCache {
         debug_assert!(chunk.is_static());
 
         let entity_path = chunk.entity_path();
-        let place_holder_timeline = TimelineName::new("ignored for static chunk");
+        let place_holder_timeline = TimelineName::from("ignored for static chunk");
 
         let transform_child_frame_component =
             archetypes::Transform3D::descriptor_child_frame().component;

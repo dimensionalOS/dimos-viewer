@@ -19,14 +19,15 @@ use arrow::array::{ArrayRef as ArrowArrayRef, ListArray as ArrowListArray};
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use arrow_utils::arrow_array_from_c_ffi;
 use component_type_registry::COMPONENT_TYPES;
+use itertools::Itertools as _;
 use re_arrow_util::ArrowArrayDowncastRef as _;
 use re_sdk::external::nohash_hasher::IntMap;
 use re_sdk::external::re_log_types::TimelineName;
 use re_sdk::log::{Chunk, ChunkId, PendingRow, TimeColumn};
 use re_sdk::time::TimeType;
 use re_sdk::{
-    ComponentDescriptor, EntityPath, RecordingStream, RecordingStreamBuilder, StoreKind, TimeCell,
-    TimePoint, Timeline,
+    ArchetypeName, ComponentDescriptor, ComponentIdentifier, ComponentType, EntityPath,
+    RecordingStream, RecordingStreamBuilder, StoreKind, TimeCell, TimePoint, Timeline,
 };
 use recording_streams::{RECORDING_STREAMS, recording_stream};
 
@@ -307,7 +308,8 @@ impl TryFrom<CTimeline> for Timeline {
     type Error = CError;
 
     fn try_from(timeline: CTimeline) -> Result<Self, CError> {
-        let name = timeline.name.as_nonempty_str("timeline.name")?;
+        let name = TimelineName::try_new(timeline.name.as_nonempty_str("timeline.name")?)
+            .map_err(|err| CError::new(CErrorCode::InvalidStringArgument, &err.to_string()))?;
         let typ = match timeline.typ {
             CTimeType::Sequence => TimeType::Sequence,
             CTimeType::Duration => TimeType::DurationNs,
@@ -492,9 +494,10 @@ fn rr_register_component_type_impl(
         component_type_descr.as_optional_str("component_type.descriptor.component_type")?;
 
     let component_descr = ComponentDescriptor {
-        archetype: archetype_name.map(Into::into),
-        component: component.into(),
-        component_type: component_type_descr.map(Into::into),
+        archetype: archetype_name.and_then(|s| ArchetypeName::try_new(s).ok()),
+        component: ComponentIdentifier::try_new(component)
+            .map_err(|err| CError::new(CErrorCode::InvalidStringArgument, &err.to_string()))?,
+        component_type: component_type_descr.and_then(|s| ComponentType::try_new(s).ok()),
     };
 
     let field = arrow::datatypes::Field::try_from(&component_type.schema).map_err(|err| {
@@ -646,8 +649,8 @@ pub extern "C" fn rr_recording_stream_free(id: CRecordingStream) {
             drop(stream);
         }
     } else {
-        // Yes, at least as of writing we can still log things in this state!
-        re_log::debug!(
+        // ⚠️ Don't use `re_log` here since it goes through `tracing` which _also_ may have shut down thread locals at this point, causing a panic when accessing them.
+        eprintln!(
             "rr_recording_stream_free called on a thread that is shutting down and can no longer access thread locals. We can't handle this and have to ignore this call."
         );
     }
@@ -824,7 +827,7 @@ fn rr_recording_stream_serve_grpc_impl(
     let cors_allowed_origins: Vec<String> = cors_allow_origins
         .iter()
         .map(|s| Ok(s.as_nonempty_str("cors_allow_origin")?.to_owned()))
-        .collect::<Result<Vec<_>, CError>>()?;
+        .try_collect()?;
     let server_options = re_sdk::ServerOptions {
         playback_behavior: re_sdk::PlaybackBehavior::from_newest_first(newest_first),
 
@@ -963,7 +966,8 @@ fn rr_recording_stream_set_time_impl(
     time_type: CTimeType,
     value: i64,
 ) -> Result<(), CError> {
-    let timeline = timeline_name.as_nonempty_str("timeline_name")?;
+    let timeline = TimelineName::try_new(timeline_name.as_nonempty_str("timeline_name")?)
+        .map_err(|err| CError::new(CErrorCode::InvalidStringArgument, &err.to_string()))?;
     let stream = recording_stream(stream)?;
     let time_type = match time_type {
         CTimeType::Sequence => TimeType::Sequence,
@@ -993,7 +997,8 @@ fn rr_recording_stream_disable_timeline_impl(
     stream: CRecordingStream,
     timeline_name: CStringView,
 ) -> Result<(), CError> {
-    let timeline = timeline_name.as_nonempty_str("timeline_name")?;
+    let timeline = TimelineName::try_new(timeline_name.as_nonempty_str("timeline_name")?)
+        .map_err(|err| CError::new(CErrorCode::InvalidStringArgument, &err.to_string()))?;
     recording_stream(stream)?.disable_timeline(timeline);
     Ok(())
 }
@@ -1015,6 +1020,28 @@ pub extern "C" fn rr_recording_stream_disable_timeline(
 pub extern "C" fn rr_recording_stream_reset_time(stream: CRecordingStream) {
     if let Some(stream) = RECORDING_STREAMS.lock().get(stream) {
         stream.reset_time();
+    }
+}
+
+#[expect(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn rr_recording_stream_set_log_tick_enabled(
+    stream: CRecordingStream,
+    enabled: bool,
+) {
+    if let Some(stream) = RECORDING_STREAMS.lock().get(stream) {
+        stream.set_log_tick_enabled(enabled);
+    }
+}
+
+#[expect(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn rr_recording_stream_set_log_time_enabled(
+    stream: CRecordingStream,
+    enabled: bool,
+) {
+    if let Some(stream) = RECORDING_STREAMS.lock().get(stream) {
+        stream.set_log_time_enabled(enabled);
     }
 }
 
@@ -1217,7 +1244,7 @@ fn rr_recording_stream_send_columns_impl(
                 ),
             ))
         })
-        .collect::<Result<_, CError>>()?;
+        .try_collect()?;
 
     let components: IntMap<ComponentDescriptor, ArrowListArray> = {
         let component_type_registry = COMPONENT_TYPES.read();
@@ -1246,7 +1273,7 @@ fn rr_recording_stream_send_columns_impl(
 
                 Ok((component_type.descriptor.clone(), component_values.clone()))
             })
-            .collect::<Result<_, CError>>()?
+            .try_collect()?
     };
 
     let chunk = Chunk::from_auto_row_ids(

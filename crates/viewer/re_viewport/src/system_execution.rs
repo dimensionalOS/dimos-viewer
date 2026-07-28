@@ -57,6 +57,17 @@ fn run_view_systems(
         .systems
         .par_iter()
         .map(|(name, vis_system)| {
+            // Skip execution when no entities in the view have instructions for this
+            // visualizer.
+            if !query
+                .active_visualizer_instructions_per_type
+                .contains_key(name)
+            {
+                let mut output = VisualizerExecutionOutput::default();
+                output.affinity = vis_system.affinity();
+                return (*name, Ok(output));
+            }
+
             re_tracing::profile_scope!("VisualizerSystem::execute", name.as_str());
             let affinity = vis_system.affinity();
             let result = vis_system
@@ -104,7 +115,7 @@ pub fn new_view_query<'a>(ctx: &'a ViewerContext<'a>, view: &'a ViewBlueprint) -
         view_id: view.id,
         space_origin: &view.space_origin,
         active_visualizer_instructions_per_type,
-        timeline: current_query.timeline(),
+        timeline: *ctx.time_ctrl.timeline_name(),
         latest_at: current_query.at(),
         highlights,
     }

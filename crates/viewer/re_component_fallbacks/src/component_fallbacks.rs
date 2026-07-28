@@ -1,7 +1,8 @@
 use re_sdk_types::{archetypes, components, datatypes};
 use re_viewer_context::{
-    ColormapWithRange, FallbackProviderRegistry, ImageDecodeCache, ImageInfo, ImageStatsCache,
-    QueryContext, TensorStats, TensorStatsCache, auto_color_for_entity_path,
+    ColormapWithRange, EncodedDepthImageStatsCache, FallbackProviderRegistry, ImageInfo,
+    ImageStatsCache, QueryContext, TensorStats, TensorStatsAccessor, TensorStatsCache,
+    VideoStreamCache, auto_color_for_entity_path,
 };
 
 pub fn type_fallbacks(registry: &mut FallbackProviderRegistry) {
@@ -173,11 +174,10 @@ pub fn archetype_field_fallbacks(registry: &mut FallbackProviderRegistry) {
             )
         },
     );
-
     // Boxes2D
     registry.register_component_fallback_provider(
         archetypes::Boxes2D::descriptor_draw_order().component,
-        |_| components::DrawOrder::DEFAULT_BOX2D,
+        |_| components::DrawOrder::DEFAULT_SHAPE_2D,
     );
     registry.register_component_fallback_provider(
         archetypes::Boxes2D::descriptor_show_labels().component,
@@ -228,6 +228,22 @@ pub fn archetype_field_fallbacks(registry: &mut FallbackProviderRegistry) {
                 ctx,
                 archetypes::Cylinders3D::descriptor_radii().component,
                 archetypes::Cylinders3D::descriptor_labels().component,
+            )
+        },
+    );
+
+    // Ellipses2D
+    registry.register_component_fallback_provider(
+        archetypes::Ellipses2D::descriptor_draw_order().component,
+        |_| components::DrawOrder::DEFAULT_SHAPE_2D,
+    );
+    registry.register_component_fallback_provider(
+        archetypes::Ellipses2D::descriptor_show_labels().component,
+        |ctx| {
+            show_labels_fallback(
+                ctx,
+                archetypes::Ellipses2D::descriptor_half_sizes().component,
+                archetypes::Ellipses2D::descriptor_labels().component,
             )
         },
     );
@@ -295,7 +311,8 @@ pub fn archetype_field_fallbacks(registry: &mut FallbackProviderRegistry) {
                         re_sdk_types::image::ImageKind::Depth,
                     );
                     let cache = ctx.store_ctx().caches;
-                    let image_stats = cache.memoizer(|c: &mut ImageStatsCache| c.entry(&image));
+                    let image_stats =
+                        cache.memoizer_read_or_compute::<ImageStatsCache, _, _>(&image);
                     let default_range =
                         ColormapWithRange::default_range_for_depth_images(&image_stats);
                     return [default_range[0] as f64, default_range[1] as f64].into();
@@ -316,14 +333,42 @@ pub fn archetype_field_fallbacks(registry: &mut FallbackProviderRegistry) {
         |_| ColormapWithRange::DEFAULT_DEPTH_COLORMAP,
     );
     registry.register_component_fallback_provider(
+        archetypes::EncodedDepthImage::descriptor_meter().component,
+        |ctx| {
+            // Quantized RVL payloads (ROS `32FC1`) decode to floating point depth in meters.
+            let is_quantized_rvl = ctx
+                .recording()
+                .latest_at_component::<components::Blob>(
+                    ctx.target_entity_path,
+                    &ctx.query,
+                    archetypes::EncodedDepthImage::descriptor_blob().component,
+                )
+                .is_some_and(|(_, blob)| {
+                    encoded_depth_image_media_type(ctx, blob.as_ref())
+                        .is_some_and(|media_type| media_type.as_str() == components::MediaType::RVL)
+                        && re_rvl::RosRvlMetadata::parse(blob.as_ref())
+                            .is_ok_and(|metadata| metadata.has_quantization())
+                });
+
+            if is_quantized_rvl {
+                components::DepthMeter::from(1.0)
+            } else {
+                // Match the integer default used by `DepthImage`, 1 unit = 1mm.
+                components::DepthMeter::from(1000.0)
+            }
+        },
+    );
+    registry.register_component_fallback_provider(
         archetypes::EncodedDepthImage::descriptor_depth_range().component,
         |ctx| {
-            let blob = ctx.recording().latest_at_component::<components::Blob>(
-                ctx.target_entity_path,
-                &ctx.query,
-                archetypes::EncodedDepthImage::descriptor_blob().component,
-            );
-            if let Some(((_time, row_id), blob)) = blob {
+            let blob_component = archetypes::EncodedDepthImage::descriptor_blob().component;
+            if let Some(((_time, blob_row_id), blob)) =
+                ctx.recording().latest_at_component::<components::Blob>(
+                    ctx.target_entity_path,
+                    &ctx.query,
+                    blob_component,
+                )
+            {
                 let media_type = ctx
                     .recording()
                     .latest_at_component::<components::MediaType>(
@@ -331,26 +376,59 @@ pub fn archetype_field_fallbacks(registry: &mut FallbackProviderRegistry) {
                         &ctx.query,
                         archetypes::EncodedDepthImage::descriptor_media_type().component,
                     )
-                    .map(|(_, media_type)| media_type);
+                    .map(|(_, c)| c);
 
-                let cache = ctx.store_ctx().caches;
-                let blob_bytes = blob.0.to_vec();
-                if let Ok(image) = cache.memoizer(|c: &mut ImageDecodeCache| {
-                    c.entry_encoded_depth(
-                        row_id,
-                        archetypes::EncodedDepthImage::descriptor_blob().component,
-                        &blob_bytes,
-                        media_type.as_ref(),
-                    )
-                }) {
-                    let image_stats = cache.memoizer(|c: &mut ImageStatsCache| c.entry(&image));
+                // Compute the range from the decoded image contents,
+                // mirroring the `DepthImage` fallback above.
+                let image_stats =
+                    ctx.store_ctx()
+                        .caches
+                        .memoizer(|c: &mut EncodedDepthImageStatsCache| {
+                            c.entry(
+                                blob_row_id,
+                                blob_component,
+                                blob.as_ref(),
+                                media_type.as_ref(),
+                            )
+                        });
+
+                if let Some(image_stats) = image_stats {
                     let default_range =
                         ColormapWithRange::default_range_for_depth_images(&image_stats);
                     return [default_range[0] as f64, default_range[1] as f64].into();
                 }
+
+                // Decoding failed — fall back to the full range of the encoded bit depth.
+                if let Some(timeline) = ctx.query.timeline() {
+                    let video = ctx.store_ctx().caches.memoizer(|c: &mut VideoStreamCache| {
+                        let media_type = media_type.map(|c| c.to_string());
+
+                        c.entry(
+                            ctx.recording(),
+                            ctx.target_entity_path,
+                            timeline,
+                            ctx.viewer_ctx().app_options().video_decoder_settings(),
+                            blob_component,
+                            re_video::VideoCodec::ImageSequence(media_type),
+                        )
+                    });
+
+                    if let Ok(video) = video
+                        && let Some(bit_depth) = video
+                            .read_arc()
+                            .video_descr()
+                            .encoding_details
+                            .as_ref()
+                            .and_then(|d| d.bit_depth)
+                    {
+                        let max = (1u64 << bit_depth) - 1;
+                        return [0.0, max as f64].into();
+                    }
+                }
             }
 
-            components::ValueRange::from([0.0, f64::MAX])
+            // Fall back to 16-bit depth range.
+            components::ValueRange::from([0.0, 65535.0])
         },
     );
 
@@ -374,6 +452,20 @@ pub fn archetype_field_fallbacks(registry: &mut FallbackProviderRegistry) {
     registry.register_component_fallback_provider(
         archetypes::GridMap::descriptor_cell_size().component,
         |_| components::CellSize::from(0.01),
+    );
+
+    // VoxelGridMap
+    registry.register_component_fallback_provider(
+        archetypes::VoxelGridMap::descriptor_voxel_size().component,
+        |_| components::VoxelSize::from([0.01, 0.01, 0.01]),
+    );
+    registry.register_component_fallback_provider(
+        archetypes::VoxelGridMap::descriptor_value_range().component,
+        |_| components::ValueRange::new(0.0, 1.0),
+    );
+    registry.register_component_fallback_provider(
+        archetypes::VoxelGridMap::descriptor_colormap().component,
+        |_| components::Colormap::Turbo,
     );
 
     // SegmentationImage
@@ -406,9 +498,13 @@ pub fn archetype_field_fallbacks(registry: &mut FallbackProviderRegistry) {
                     archetypes::Tensor::descriptor_data().component,
                 )
             {
-                let tensor_stats = ctx.store_ctx().memoizer(|c: &mut TensorStatsCache| {
-                    c.entry(re_log_types::hash::Hash64::hash(row_id), &tensor)
-                });
+                let tensor_cache_key = re_log_types::hash::Hash64::hash(row_id);
+                let tensor_stats = ctx
+                    .store_ctx()
+                    .memoizer_read_or_compute::<TensorStatsCache, _, _>(&TensorStatsAccessor {
+                        tensor_cache_key,
+                        tensor: &tensor,
+                    });
                 tensor_data_range_heuristic(&tensor_stats, tensor.dtype())
             } else {
                 components::ValueRange::new(0.0, 1.0)
@@ -511,6 +607,21 @@ fn show_labels_fallback(
         .map_or(0, |array| array.len());
 
     components::ShowLabels::from(num_labels == 1 || num_instances < MAX_NUM_LABELS_PER_ENTITY)
+}
+
+/// The media type logged for an `EncodedDepthImage`, or one guessed from the blob contents.
+fn encoded_depth_image_media_type(
+    ctx: &QueryContext<'_>,
+    blob: &[u8],
+) -> Option<components::MediaType> {
+    ctx.recording()
+        .latest_at_component::<components::MediaType>(
+            ctx.target_entity_path,
+            &ctx.query,
+            archetypes::EncodedDepthImage::descriptor_media_type().component,
+        )
+        .map(|(_, c)| c)
+        .or_else(|| components::MediaType::guess_from_data(blob))
 }
 
 /// Get a valid, finite range for the gpu to use.

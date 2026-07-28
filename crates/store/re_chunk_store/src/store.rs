@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use ahash::{HashMap, HashSet};
+use futures::{AsyncRead, StreamExt as _};
 use itertools::Itertools as _;
 use nohash_hasher::IntMap;
 use parking_lot::RwLock;
@@ -11,7 +12,8 @@ use re_log::debug_assert;
 use re_chunk::{Chunk, ChunkId, ComponentIdentifier, RowId, TimelineName};
 use re_log_types::{EntityPath, StoreId, TimeInt};
 
-use crate::{ChunkDirectLineage, ChunkStoreChunkStats, ChunkStoreError, ChunkStoreResult};
+use crate::lineage::TrackedDirectChunkLineage;
+use crate::{ChunkStoreChunkStats, ChunkStoreError, ChunkStoreResult};
 
 // ---
 
@@ -29,7 +31,7 @@ use crate::{ChunkDirectLineage, ChunkStoreChunkStats, ChunkStoreError, ChunkStor
 /// In other words, these thresholds define the target chunk size window from both directions.
 ///
 // TODO(emilk): we should be able to turn on/off merging and splitting independently.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, re_byte_size::SizeBytes)]
 pub struct ChunkStoreConfig {
     /// If `true` (the default), the store will emit events when its contents are modified in
     /// any way (insertion, GC), that can be subscribed to.
@@ -116,19 +118,26 @@ impl Default for ChunkStoreConfig {
     }
 }
 
-impl re_byte_size::SizeBytes for ChunkStoreConfig {
-    fn heap_size_bytes(&self) -> u64 {
-        0
-    }
-
-    #[inline]
-    fn is_pod() -> bool {
-        true
+impl std::fmt::Display for ChunkStoreConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enable_changelog,
+            chunk_max_bytes,
+            chunk_max_rows,
+            chunk_max_rows_if_unsorted,
+        } = self;
+        write!(
+            f,
+            "ChunkStoreConfig {{ enable_changelog: {enable_changelog}, chunk_max_bytes: {}, chunk_max_rows: {}, chunk_max_rows_if_unsorted: {} }}",
+            re_format::format_bytes(*chunk_max_bytes as _),
+            re_format::format_uint(*chunk_max_rows),
+            re_format::format_uint(*chunk_max_rows_if_unsorted),
+        )
     }
 }
 
 impl ChunkStoreConfig {
-    /// Default configuration, applicable to most use cases, according to empirical testing.
+    /// Default configuration for the embedded (in-memory) chunkstore in the viewer.
     pub const DEFAULT: Self = Self {
         enable_changelog: true,
 
@@ -266,7 +275,7 @@ fn chunk_store_config() {
 
 pub type ChunkIdSet = BTreeSet<ChunkId>;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, re_byte_size::SizeBytes)]
 pub struct ChunkIdSetPerTime {
     /// Keeps track of the longest interval being currently stored in the two maps below.
     ///
@@ -289,8 +298,8 @@ pub struct ChunkIdSetPerTime {
     /// * For an `(entity, timeline)` index, that would be the first timestamp at which this [`Chunk`]
     ///   contains data for any component on this particular timeline (see [`re_chunk::TimeColumn::time_range`]).
     ///
-    /// This index includes virtual/offloaded chunks, and therefore is purely additive: garbage collection
-    /// will never remove values from this set.
+    /// This index includes virtual/offloaded chunks, so [shallow garbage collection](ChunkStore::remove_chunks_shallow) may retain such ids.
+    /// [Deep removal](ChunkStore::remove_chunks_deep), however, does remove ids from this map and drops empty entries.
     pub(crate) per_start_time: BTreeMap<TimeInt, ChunkIdSet>,
 
     /// *Both physical & virtual* [`ChunkId`]s organized by their _most specific_ end time.
@@ -303,23 +312,9 @@ pub struct ChunkIdSetPerTime {
     /// * For an `(entity, timeline)` index, that would be the last timestamp at which this [`Chunk`]
     ///   contains data for any component on this particular timeline (see [`re_chunk::TimeColumn::time_range`]).
     ///
-    /// This index includes virtual/offloaded chunks, and therefore is purely additive: garbage collection
-    /// will never remove values from this set.
+    /// This index includes virtual/offloaded chunks, so [shallow garbage collection](ChunkStore::remove_chunks_shallow) may retain such ids.
+    /// [Deep removal](ChunkStore::remove_chunks_deep), however, does remove ids from this map and drops empty entries.
     pub(crate) per_end_time: BTreeMap<TimeInt, ChunkIdSet>,
-}
-
-impl re_byte_size::SizeBytes for ChunkIdSetPerTime {
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            max_interval_length,
-            per_start_time,
-            per_end_time,
-        } = self;
-
-        max_interval_length.heap_size_bytes()
-            + per_start_time.heap_size_bytes()
-            + per_end_time.heap_size_bytes()
-    }
 }
 
 pub type ChunkIdSetPerTimePerComponent = IntMap<ComponentIdentifier, ChunkIdSetPerTime>;
@@ -355,7 +350,7 @@ pub struct ColumnMetadata {
 }
 
 /// Internal state that needs to be maintained in order to compute [`ColumnMetadata`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, re_byte_size::SizeBytes)]
 pub struct ColumnMetadataState {
     /// Whether this column contains either no data or only contains null and/or empty values (`[]`).
     ///
@@ -367,17 +362,6 @@ pub struct ColumnMetadataState {
     ///
     /// Starts as `false` and flips to `true` once static data is observed. Never goes back.
     pub is_static: bool,
-}
-
-impl re_byte_size::SizeBytes for ColumnMetadataState {
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            is_semantically_empty,
-            is_static,
-        } = self;
-
-        is_semantically_empty.heap_size_bytes() + is_static.heap_size_bytes()
-    }
 }
 
 /// Incremented on each edit.
@@ -479,10 +463,13 @@ impl ChunkStoreHandle {
 
 /// This keeps track of all missing virtual [`ChunkId`]s and all
 /// used physical [`ChunkId`]s.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, re_byte_size::SizeBytes)]
 pub struct QueriedChunkIdTracker {
     /// Used physical chunks.
     pub used_physical: HashSet<ChunkId>,
+
+    /// Used physical chunks, but we shouldn't indicate their entity/components as used.
+    pub transient_used_physical: HashSet<ChunkId>,
 
     /// Missing virtual chunks.
     ///
@@ -496,16 +483,29 @@ pub struct QueriedChunkIdTracker {
     // chunks using their root-level IDs, so downstream consumers don't have to redundantly build
     // their own tracking. And document it so.
     pub missing_virtual: HashSet<ChunkId>,
+
+    /// Chunks that are reported as missing, but we shouldn't indicate their entity/componetns as used.
+    pub transient_missing_virtual: HashSet<ChunkId>,
+
+    /// Chunks that aren't necessarily missing, but are expected to be needed soon.
+    pub indicated_virtual: HashSet<ChunkId>,
 }
 
-impl re_byte_size::SizeBytes for QueriedChunkIdTracker {
-    fn heap_size_bytes(&self) -> u64 {
+impl QueriedChunkIdTracker {
+    pub fn shrink_to_fit(&mut self) {
         let Self {
             used_physical,
+            transient_used_physical,
             missing_virtual,
+            transient_missing_virtual,
+            indicated_virtual,
         } = self;
 
-        used_physical.heap_size_bytes() + missing_virtual.heap_size_bytes()
+        used_physical.shrink_to_fit();
+        transient_used_physical.shrink_to_fit();
+        missing_virtual.shrink_to_fit();
+        transient_missing_virtual.shrink_to_fit();
+        indicated_virtual.shrink_to_fit();
     }
 }
 
@@ -561,8 +561,9 @@ pub struct ChunkStore {
     /// * A reference to an RRD manifest, from which the chunk was virtually loaded from, and where
     ///   it can still be reached, provided that the associated Redap server still exists.
     ///
-    /// This is purely additive: never garbage collected.
-    pub(crate) chunks_lineage: HashMap<ChunkId, ChunkDirectLineage>,
+    /// For non-manifest chunk lineages this is internally ref counted, and lineages are dropped
+    /// when no physical chunk, or other lineage is referencing it.
+    pub(crate) chunks_lineage: HashMap<ChunkId, TrackedDirectChunkLineage>,
 
     /// Anytime a chunk gets split during insertion, this is recorded here.
     ///
@@ -610,7 +611,7 @@ pub struct ChunkStore {
     /// * performance of the query engine
     /// * hard to reason about for downstream consumers building secondary datastructures (e.g. video cache)
     ///
-    /// This is purely additive: never garbage collected.
+    /// This is garbage collected together with `chunks_lineage`.
     ///
     /// `HashMap<OriginalChunkId, CompactedChunkId>`
     pub(crate) leaky_compactions: HashMap<ChunkId, ChunkId>,
@@ -802,7 +803,7 @@ impl ChunkStore {
     ///
     /// See also:
     /// * [`ChunkStore::new`]
-    /// * [`ChunkStore::from_rrd_filepath`]
+    /// * [`ChunkStore::from_rrd_reader`]
     #[inline]
     pub fn new(id: StoreId, config: ChunkStoreConfig) -> Self {
         Self {
@@ -832,7 +833,7 @@ impl ChunkStore {
     /// Pre-wraps the result in a [`ChunkStoreHandle`].
     ///
     /// See also:
-    /// * [`ChunkStore::from_rrd_filepath`]
+    /// * [`ChunkStore::new`]
     #[inline]
     pub fn new_handle(id: StoreId, config: ChunkStoreConfig) -> ChunkStoreHandle {
         ChunkStoreHandle::new(Self::new(id, config))
@@ -950,6 +951,48 @@ impl ChunkStore {
         chunk
     }
 
+    /// Get a *physical* chunk based on its ID and track the chunk as either
+    /// used or missing, to signal that it should be kept or fetched.
+    ///
+    /// If the given chunk isn't physical `None` is returned and the ID is reported
+    /// missing.
+    ///
+    /// Unlike [`ChunkStore::use_chunk_or_report_missing`], this does not signal
+    /// that similar chunks should also be downloaded.
+    #[track_caller]
+    pub fn use_transient_chunk_or_report_missing(&self, id: &ChunkId) -> Option<&Arc<Chunk>> {
+        let chunk = self.physical_chunk(id);
+
+        if chunk.is_some() {
+            self.report_transient_used_physical_chunk_id(*id);
+        } else {
+            self.report_transient_missing_virtual_chunk_id(*id);
+        }
+
+        chunk
+    }
+
+    /// Get a *physical* chunk based on its ID and track the chunk as either
+    /// used or indicated, to signal that it should be kept or fetched.
+    ///
+    /// If the given chunk isn't physical `None` is returned and the ID is reported
+    /// as possibly needed in the future.
+    ///
+    /// Unlike [`ChunkStore::use_chunk_or_report_missing`], this does make missing chunks
+    /// required.
+    #[track_caller]
+    pub fn use_chunk_or_indicate(&self, id: &ChunkId) -> Option<&Arc<Chunk>> {
+        let chunk = self.physical_chunk(id);
+
+        if chunk.is_some() {
+            self.report_used_physical_chunk_id(*id);
+        } else {
+            self.indicate_virtual_chunk_id(*id);
+        }
+
+        chunk
+    }
+
     /// Get the number of *physical* chunks in the store.
     #[inline]
     pub fn num_physical_chunks(&self) -> usize {
@@ -1047,6 +1090,53 @@ impl ChunkStore {
             .insert(chunk_id);
     }
 
+    /// Signal that the chunk was used and should not be evicted by gc.
+    ///
+    /// Unlike [`ChunkStore::report_used_physical_chunk_id`], this does not signal
+    /// that similar chunks should also be downloaded.
+    pub fn report_transient_used_physical_chunk_id(&self, chunk_id: ChunkId) {
+        debug_assert!(self.physical_chunk(&chunk_id).is_some());
+
+        self.queried_chunk_id_tracker
+            .write()
+            .transient_used_physical
+            .insert(chunk_id);
+    }
+
+    /// Signal that a chunk is missing and should be fetched when possible.
+    ///
+    /// Unlike [`ChunkStore::report_missing_virtual_chunk_id`], this does not signal
+    /// that similar chunks should also be downloaded.
+    #[track_caller]
+    pub fn report_transient_missing_virtual_chunk_id(&self, chunk_id: ChunkId) {
+        debug_assert!(
+            self.chunks_lineage.contains_key(&chunk_id),
+            "A chunk was reported missing, with no known lineage: {chunk_id}"
+        );
+
+        self.queried_chunk_id_tracker
+            .write()
+            .transient_missing_virtual
+            .insert(chunk_id);
+    }
+
+    /// Signal that a chunk should be fetched when possible.
+    ///
+    /// Unlike [`ChunkStore::report_missing_virtual_chunk_id`], this does not
+    /// make the missing chunk required.
+    #[track_caller]
+    pub fn indicate_virtual_chunk_id(&self, chunk_id: ChunkId) {
+        debug_assert!(
+            self.chunks_lineage.contains_key(&chunk_id),
+            "A chunk was reported missing, with no known lineage: {chunk_id}"
+        );
+
+        self.queried_chunk_id_tracker
+            .write()
+            .indicated_virtual
+            .insert(chunk_id);
+    }
+
     /// How many missing chunk IDs are currently registered?
     ///
     /// See also [`ChunkStore::take_tracked_chunk_ids`].
@@ -1060,54 +1150,49 @@ impl ChunkStore {
 impl ChunkStore {
     /// Instantiate a new `ChunkStore` with the given [`ChunkStoreConfig`].
     ///
-    /// The stores will be prefilled with the data at the specified path.
+    /// The stores will be prefilled with the data from the given RRD reader.
     ///
     /// See also:
     /// * [`ChunkStore::new`]
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn from_rrd_filepath(
+    pub fn from_rrd_reader(
         store_config: &ChunkStoreConfig,
-        path_to_rrd: impl AsRef<std::path::Path>,
+        reader: &mut dyn std::io::Read,
     ) -> anyhow::Result<BTreeMap<StoreId, Self>> {
-        let path_to_rrd = path_to_rrd.as_ref();
-
-        re_tracing::profile_function!(path_to_rrd.to_string_lossy());
-
         use anyhow::Context as _;
 
+        let decoder = re_log_encoding::Decoder::decode_eager(std::io::BufReader::new(reader))
+            .with_context(|| "couldn't decode RRD stream".to_owned())?;
+
         let mut stores = BTreeMap::new();
-
-        let rrd_file = std::fs::File::open(path_to_rrd)
-            .with_context(|| format!("couldn't open {path_to_rrd:?}"))?;
-
-        let decoder = re_log_encoding::Decoder::decode_eager(std::io::BufReader::new(rrd_file))
-            .with_context(|| format!("couldn't decode {path_to_rrd:?}"))?;
-
-        // TODO(cmc): offload the decoding to a background thread.
         for res in decoder {
-            let msg = res.with_context(|| format!("couldn't decode message {path_to_rrd:?}"))?;
-            match msg {
-                re_log_types::LogMsg::SetStoreInfo(info) => {
-                    stores.entry(info.info.store_id.clone()).or_insert_with(|| {
-                        Self::new(info.info.store_id.clone(), store_config.clone())
-                    });
-                }
+            let msg = res.with_context(|| "couldn't decode message from RRD stream".to_owned())?;
+            Self::insert_log_msg(store_config, &mut stores, msg)?;
+        }
 
-                re_log_types::LogMsg::ArrowMsg(store_id, msg) => {
-                    let Some(store) = stores.get_mut(&store_id) else {
-                        anyhow::bail!("unknown store ID: {store_id:?}");
-                    };
+        Ok(stores)
+    }
 
-                    let chunk = Chunk::from_arrow_msg(&msg)
-                        .with_context(|| format!("couldn't decode chunk {path_to_rrd:?}"))?;
+    /// Instantiate a new `ChunkStore` with the given [`ChunkStoreConfig`].
+    ///
+    /// The stores will be prefilled with the data from the given RRD reader.
+    ///
+    /// See also:
+    /// * [`ChunkStore::new`]
+    pub async fn from_rrd_reader_async(
+        store_config: &ChunkStoreConfig,
+        reader: &mut (dyn AsyncRead + Unpin + Send),
+    ) -> anyhow::Result<BTreeMap<StoreId, Self>> {
+        use anyhow::Context as _;
 
-                    store
-                        .insert_chunk(&Arc::new(chunk))
-                        .with_context(|| format!("couldn't insert chunk {path_to_rrd:?}"))?;
-                }
+        let mut decoder =
+            re_log_encoding::Decoder::decode_eager_async(futures::io::BufReader::new(reader))
+                .await
+                .with_context(|| "couldn't decode RRD stream".to_owned())?;
 
-                re_log_types::LogMsg::BlueprintActivationCommand(_) => {}
-            }
+        let mut stores = BTreeMap::new();
+        while let Some(res) = decoder.next().await {
+            let msg = res.with_context(|| "couldn't decode message from RRD stream".to_owned())?;
+            Self::insert_log_msg(store_config, &mut stores, msg)?;
         }
 
         Ok(stores)
@@ -1125,54 +1210,80 @@ impl ChunkStore {
     ) -> anyhow::Result<BTreeMap<StoreId, Self>> {
         re_tracing::profile_function!();
 
-        use anyhow::Context as _;
-
         let mut stores = BTreeMap::new();
 
         // TODO(cmc): offload the decoding to a background thread.
-        let log_msgs = log_msgs.into_iter();
         for msg in log_msgs {
-            match msg {
-                re_log_types::LogMsg::SetStoreInfo(info) => {
-                    stores.entry(info.info.store_id.clone()).or_insert_with(|| {
-                        Self::new(info.info.store_id.clone(), store_config.clone())
-                    });
-                }
-
-                re_log_types::LogMsg::ArrowMsg(store_id, msg) => {
-                    let Some(store) = stores.get_mut(&store_id) else {
-                        anyhow::bail!("unknown store ID: {store_id:?}");
-                    };
-
-                    let chunk = Chunk::from_arrow_msg(&msg)
-                        .with_context(|| "couldn't decode chunk".to_owned())?;
-
-                    store
-                        .insert_chunk(&Arc::new(chunk))
-                        .with_context(|| "couldn't insert chunk".to_owned())?;
-                }
-
-                re_log_types::LogMsg::BlueprintActivationCommand(_) => {}
-            }
+            Self::insert_log_msg(store_config, &mut stores, msg)?;
         }
 
         Ok(stores)
+    }
+
+    fn insert_log_msg(
+        store_config: &ChunkStoreConfig,
+        stores: &mut BTreeMap<StoreId, Self>,
+        msg: re_log_types::LogMsg,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+
+        match msg {
+            re_log_types::LogMsg::SetStoreInfo(info) => {
+                stores
+                    .entry(info.info.store_id.clone())
+                    .or_insert_with(|| Self::new(info.info.store_id.clone(), store_config.clone()));
+            }
+
+            re_log_types::LogMsg::ArrowMsg(store_id, msg) => {
+                let Some(store) = stores.get_mut(&store_id) else {
+                    anyhow::bail!("unknown store ID: {store_id:?}");
+                };
+
+                let chunk = Chunk::from_arrow_msg(&msg)
+                    .with_context(|| "couldn't decode chunk".to_owned())?;
+
+                store
+                    .insert_chunk(&Arc::new(chunk))
+                    .with_context(|| "couldn't insert chunk".to_owned())?;
+            }
+
+            re_log_types::LogMsg::BlueprintActivationCommand(_) => {}
+        }
+
+        Ok(())
     }
 
     /// Instantiate a new `ChunkStore` with the given [`ChunkStoreConfig`].
     ///
     /// Wraps the results in [`ChunkStoreHandle`]s.
     ///
-    /// The stores will be prefilled with the data at the specified path.
+    ///
+    /// The stores will be prefilled with the data from the given RRD reader.
     ///
     /// See also:
     /// * [`ChunkStore::new_handle`]
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn handle_from_rrd_filepath(
+    pub fn handle_from_rrd_reader(
         store_config: &ChunkStoreConfig,
-        path_to_rrd: impl AsRef<std::path::Path>,
+        mut reader: impl std::io::Read,
     ) -> anyhow::Result<BTreeMap<StoreId, ChunkStoreHandle>> {
-        Ok(Self::from_rrd_filepath(store_config, path_to_rrd)?
+        Ok(Self::from_rrd_reader(store_config, &mut reader)?
+            .into_iter()
+            .map(|(store_id, store)| (store_id, ChunkStoreHandle::new(store)))
+            .collect())
+    }
+
+    /// Instantiate new [`ChunkStoreHandle`]s with the given [`ChunkStoreConfig`].
+    ///
+    /// The stores will be prefilled with the data from the given RRD reader.
+    ///
+    /// See also:
+    /// * [`ChunkStore::new_handle`]
+    pub async fn handle_from_rrd_reader_async<R: AsyncRead + Unpin + Send>(
+        store_config: &ChunkStoreConfig,
+        mut reader: R,
+    ) -> anyhow::Result<BTreeMap<StoreId, ChunkStoreHandle>> {
+        Ok(Self::from_rrd_reader_async(store_config, &mut reader)
+            .await?
             .into_iter()
             .map(|(store_id, store)| (store_id, ChunkStoreHandle::new(store)))
             .collect())

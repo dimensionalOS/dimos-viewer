@@ -2,27 +2,29 @@ use egui::emath::RectTransform;
 use egui::{Align2, Pos2, Rect, Shape, Vec2, pos2, vec2};
 use macaw::IsoTransform;
 use re_chunk_store::MissingChunkReporter;
-use re_entity_db::EntityPath;
 use re_log::ResultExt as _;
-use re_renderer::ViewPickingConfiguration;
 use re_renderer::view_builder::{TargetConfiguration, ViewBuilder};
-use re_sdk_types::blueprint::archetypes::{Background, NearClipPlane, VisualBounds2D};
-use re_sdk_types::blueprint::components as blueprint_components;
+use re_renderer::{LineDrawableBuilder, ViewPickingConfiguration};
+use re_sdk_types::blueprint::archetypes::{
+    Background, NearClipPlane, SpatialInformation, VisualBounds2D,
+};
+use re_sdk_types::blueprint::components::{self as blueprint_components, Enabled};
 use re_sdk_types::{Archetype as _, archetypes};
+use re_tf::TransformFrameIdHash;
 use re_ui::{ContextExt as _, Help, MouseButtonText, icons};
 use re_view::controls::DRAG_PAN2D_BUTTON;
 use re_viewer_context::{
-    ItemContext, QueryContext, ViewClass as _, ViewClassExt as _, ViewContext, ViewQuery,
-    ViewSystemExecutionError, ViewerContext, gpu_bridge, typed_fallback_for,
+    ItemContext, QueryContext, ViewClassExt as _, ViewContext, ViewQuery, ViewSystemExecutionError,
+    ViewerContext, gpu_bridge, typed_fallback_for,
 };
 use re_viewport_blueprint::ViewProperty;
 
 use super::eye::Eye;
-use super::ui::create_labels;
+use super::ui::{create_labels, draw_bounding_boxes, draw_origin_axes};
+use crate::SpaceKind;
 use crate::contexts::TransformTreeContext;
 use crate::ui::SpatialViewState;
-use crate::view_kind::SpatialViewKind;
-use crate::visualizers::collect_ui_labels;
+use crate::visualizers::{Axes, collect_ui_labels};
 use crate::{Pinhole, SpatialView2D};
 // ---
 
@@ -87,11 +89,18 @@ fn ui_from_scene(
                 .inverse()
                 .transform_pos(zoom_center_in_ui)
                 .to_vec2();
-            bounds_rect = scale_rect(
+            let candidate = scale_rect(
                 bounds_rect.translate(-zoom_center_in_scene),
                 Vec2::splat(1.0) / zoom_delta,
             )
             .translate(zoom_center_in_scene);
+
+            bounds_rect = clamp_zoom_out(
+                bounds_rect,
+                candidate,
+                zoom_center_in_scene,
+                &view_state.bounding_boxes.current,
+            );
         }
     }
 
@@ -118,6 +127,55 @@ fn scale_rect(rect: Rect, factor: Vec2) -> Rect {
         (factor * rect.min.to_vec2()).to_pos2(),
         (factor * rect.max.to_vec2()).to_pos2(),
     )
+}
+
+/// Cap on how large the 2D visible area is allowed to grow, measured per-axis as a multiple
+/// of the matching scene bounding box extent.
+///
+/// Applied to zoom-out only: width is clamped against `scene_size.x * factor` and height
+/// against `scene_size.y * factor`. An axis that is already past the limit is pinned at its
+/// current size, never pulled back in; zoom-in is never restricted.
+const MAX_ZOOM_OUT_FACTOR: f32 = 5.0;
+
+/// Cap zoom-out against the scene bounding box.
+///
+/// If we're already past the cap (e.g. right after loading) use the current size instead — no
+/// snap-back. Zooming in is never restricted.
+fn clamp_zoom_out(
+    current: Rect,
+    candidate: Rect,
+    zoom_center: Vec2,
+    scene_bbox: &macaw::BoundingBox,
+) -> Rect {
+    // `1.0e17` fallback is chosen with generous margin of an observed crash due to infinity.
+    let fallback = Vec2::splat(1.0e17);
+
+    let max_size = if scene_bbox.is_finite() && !scene_bbox.is_nothing() {
+        let scene_size = scene_bbox.size();
+        let max_size = vec2(scene_size.x, scene_size.y) * MAX_ZOOM_OUT_FACTOR;
+        if max_size.x.is_finite() && max_size.x > 0.0 && max_size.y.is_finite() && max_size.y > 0.0
+        {
+            max_size
+        } else {
+            fallback
+        }
+    } else {
+        fallback
+    }
+    .max(current.size());
+
+    let candidate_size = candidate.size();
+    let clamped_size = candidate_size.min(max_size);
+
+    if clamped_size == candidate_size {
+        candidate
+    } else {
+        scale_rect(
+            current.translate(-zoom_center),
+            clamped_size / current.size(),
+        )
+        .translate(zoom_center)
+    }
 }
 
 pub fn help(os: egui::os::OperatingSystem) -> Help {
@@ -150,67 +208,53 @@ impl SpatialView2D {
             return Ok(());
         }
 
-        // TODO(andreas): Why don't we have this already?
-        let view_ctx = ViewContext {
-            viewer_ctx: ctx,
-            view_id: query.view_id,
-            view_class_identifier: Self::identifier(),
-            space_origin: query.space_origin,
-            view_state: state,
-            query_result: ctx.lookup_query_result(query.view_id),
-        };
-
         // TODO(emilk): some way to visualize the resolution rectangle of the pinhole camera (in case there is no image logged).
         let transforms = system_output
             .context_systems
             .get_and_report_missing::<TransformTreeContext>(missing_chunk_reporter)?;
-        state.pinhole_at_origin = transforms
-            .pinhole_tree_root_info(transforms.target_frame())
-            .map(|pinhole_at_root| {
-                let pinhole = &pinhole_at_root.pinhole_projection;
+        let view_target_frame = transforms.target_frame();
+        state.pinhole_at_origin =
+            transforms
+                .pinhole_tree_root_info(view_target_frame)
+                .map(|pinhole_at_root| {
+                    let pinhole = &pinhole_at_root.pinhole_projection;
 
-                let query_ctx = QueryContext {
-                    view_ctx: &view_ctx,
-                    target_entity_path: query.space_origin,
-                    instruction_id: None,
-                    archetype_name: Some(archetypes::Pinhole::name()),
-                    query: query.latest_at_query(),
-                };
-                Pinhole {
-                    image_from_camera: pinhole.image_from_camera.0.into(),
-                    resolution: pinhole
-                        .resolution
-                        .unwrap_or_else(|| {
-                            typed_fallback_for(
-                                &query_ctx,
-                                archetypes::Pinhole::descriptor_resolution().component,
-                            )
-                        })
-                        .into(),
-                }
-            });
+                    let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin);
+                    let query_ctx = QueryContext {
+                        view_ctx: &view_ctx,
+                        target_entity_path: query.space_origin,
+                        instruction_id: None,
+                        archetype_name: Some(archetypes::Pinhole::name()),
+                        query: query.latest_at_query(),
+                    };
+                    Pinhole {
+                        image_from_camera: pinhole.image_from_camera.0.into(),
+                        resolution: pinhole
+                            .resolution
+                            .unwrap_or_else(|| {
+                                typed_fallback_for(
+                                    &query_ctx,
+                                    archetypes::Pinhole::descriptor_resolution().component,
+                                )
+                            })
+                            .into(),
+                    }
+                });
 
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let ui_rect = response.rect;
 
-        let bounds_property = ViewProperty::from_archetype::<VisualBounds2D>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
-        let clip_property = ViewProperty::from_archetype::<NearClipPlane>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
+        let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin);
+        let bounds_property = ViewProperty::from_archetype::<VisualBounds2D>(&view_ctx);
+        let clip_property = ViewProperty::from_archetype::<NearClipPlane>(&view_ctx);
 
         // Convert ui coordinates to/from scene coordinates.
         let ui_from_scene = {
-            let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin);
             let mut new_state = state.clone();
             let ui_from_scene =
                 ui_from_scene(&view_ctx, &response, &mut new_state, &bounds_property);
+
             *state = new_state;
 
             ui_from_scene
@@ -242,7 +286,7 @@ impl SpatialView2D {
             &eye,
             ui,
             &query.highlights,
-            SpatialViewKind::TwoD,
+            SpaceKind::TwoD,
         );
 
         let picking_config = if let Some(pointer_pos_ui) = response.hover_pos() {
@@ -262,7 +306,7 @@ impl SpatialView2D {
                 &system_output,
                 &label_ui_rects,
                 query,
-                SpatialViewKind::TwoD,
+                SpaceKind::TwoD,
             )?;
             picking_config
         } else {
@@ -284,19 +328,42 @@ impl SpatialView2D {
         ) else {
             return Ok(());
         };
-        let mut view_builder = ViewBuilder::new(ctx.render_ctx(), target_config)?;
+        let mut view_builder = ViewBuilder::new(
+            ctx.render_ctx(),
+            target_config,
+            query.view_id.render_view_id(),
+        )?;
 
-        let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin); // Recreate view state to handle context editing during picking.
+        let (show_axes, show_bounding_box) = {
+            let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin);
+            let information_property =
+                ViewProperty::from_archetype::<SpatialInformation>(&view_ctx);
+            let show_axes = **information_property.component_or_fallback::<Enabled>(
+                &view_ctx,
+                SpatialInformation::descriptor_show_axes().component,
+            )?;
+            let show_bounding_box = **information_property.component_or_fallback::<Enabled>(
+                &view_ctx,
+                SpatialInformation::descriptor_show_bounding_box().component,
+            )?;
+            (show_axes, show_bounding_box)
+        };
+        state.show_bounding_box = show_bounding_box;
+
+        let mut line_builder = LineDrawableBuilder::new(ctx.render_ctx());
+
+        if show_axes {
+            draw_origin_axes(ctx.tokens(), &mut line_builder, state, Axes::Xy);
+        }
+        draw_bounding_boxes(ctx.tokens(), &mut line_builder, state);
 
         for draw_data in system_output.drain_draw_data() {
             view_builder.queue_draw(ctx.render_ctx(), draw_data);
         }
+        view_builder.queue_draw(ctx.render_ctx(), line_builder.into_draw_data()?);
 
-        let background = ViewProperty::from_archetype::<Background>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query,
-            query.view_id,
-        );
+        let view_ctx = self.view_context(ctx, query.view_id, state, query.space_origin);
+        let background = ViewProperty::from_archetype::<Background>(&view_ctx);
         let (background_drawable, clear_color) =
             crate::configure_background(&view_ctx, &background)?;
         if let Some(background_drawable) = background_drawable {
@@ -317,7 +384,7 @@ impl SpatialView2D {
         for selected_context in ctx.selection_state().selection_item_contexts() {
             painter.extend(show_projections_from_3d_space(
                 ui,
-                query.space_origin,
+                view_target_frame,
                 &ui_from_scene,
                 selected_context,
                 ui.selection_stroke().color,
@@ -326,7 +393,7 @@ impl SpatialView2D {
         if let Some(hovered_context) = ctx.selection_state().hovered_item_context() {
             painter.extend(show_projections_from_3d_space(
                 ui,
-                query.space_origin,
+                view_target_frame,
                 &ui_from_scene,
                 hovered_context,
                 ui.hover_stroke().color,
@@ -343,7 +410,6 @@ impl SpatialView2D {
     }
 }
 
-#[expect(clippy::too_many_arguments)]
 fn setup_target_config(
     render_mode: re_renderer::RenderMode,
     egui_painter: &egui::Painter,
@@ -461,19 +527,18 @@ fn re_render_rect_from_egui_rect(rect: egui::Rect) -> re_renderer::RectF32 {
 
 fn show_projections_from_3d_space(
     ui: &egui::Ui,
-    space: &EntityPath,
+    target_frame: TransformFrameIdHash,
     ui_from_scene: &RectTransform,
     item_context: &ItemContext,
     circle_fill_color: egui::Color32,
 ) -> Vec<Shape> {
     let mut shapes = Vec::new();
     if let ItemContext::ThreeD {
-        point_in_space_cameras: target_spaces,
-        ..
+        point_in_2d_spaces, ..
     } = item_context
     {
-        for (space_2d, pos_2d) in target_spaces {
-            if space_2d == space
+        for (space_2d_root, pos_2d) in point_in_2d_spaces {
+            if *space_2d_root == target_frame
                 && let Some(pos_2d) = pos_2d
             {
                 // User is hovering a 2D point inside a 3D view.

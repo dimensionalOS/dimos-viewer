@@ -9,7 +9,7 @@ use re_viewer_context::{ViewContext, ViewQuery, ViewerContext};
 use re_viewport_blueprint::{ViewProperty, ViewPropertyQueryError};
 
 use crate::aggregation::{AverageAggregator, MinMaxAggregator};
-use crate::{PlotPoint, PlotSeries, PlotSeriesKind, ScatterAttrs};
+use crate::{PlotPoint, PlotSeries, PlotSeriesKind};
 
 pub fn series_supported_datatypes() -> impl IntoIterator<Item = arrow::datatypes::DataType> {
     [
@@ -75,20 +75,15 @@ pub fn determine_query_range(
         .time_int()
         .unwrap_or(re_log_types::TimeInt::ZERO);
 
-    let time_axis = ViewProperty::from_archetype::<TimeAxis>(
-        ctx.viewer_ctx.blueprint_db(),
-        ctx.viewer_ctx.blueprint_query,
-        ctx.view_id,
-    );
+    let time_axis = ViewProperty::from_archetype::<TimeAxis>(ctx);
 
     let link_x_axis =
         time_axis.component_or_fallback::<LinkAxis>(ctx, TimeAxis::descriptor_link().component)?;
 
     let time_range_property = match link_x_axis {
         LinkAxis::Independent => &time_axis,
-        LinkAxis::LinkToGlobal => &ViewProperty::from_archetype::<TimeAxis>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query(),
+        LinkAxis::LinkToGlobal => &ViewProperty::from_archetype_for_view::<TimeAxis>(
+            ctx.viewer_ctx,
             re_viewer_context::GLOBAL_VIEW_ID,
         ),
     };
@@ -110,7 +105,6 @@ pub fn determine_query_range(
 // We have a bunch of raw points, and now we need to group them into individual series.
 // A series is a continuous run of points with identical attributes: each time
 // we notice a change in attributes, we need a new series.
-#[expect(clippy::too_many_arguments)]
 pub fn points_to_series(
     instance_path: InstancePath,
     time_per_pixel: f64,
@@ -138,45 +132,17 @@ pub fn points_to_series(
             |time| time.as_i64(),
         );
 
-    if points.len() == 1 {
-        // Can't draw a single point as a continuous line, so fall back on scatter
-        let mut kind = points[0].attrs.kind;
-        if matches!(
-            kind,
-            PlotSeriesKind::Continuous | PlotSeriesKind::Stepped(_)
-        ) {
-            kind = PlotSeriesKind::Scatter(ScatterAttrs::default());
-        }
-
-        let mut series = PlotSeries {
-            instance_path,
-            visible,
-            label: series_label,
-            color: points[0].attrs.color,
-            radius_ui: points[0].attrs.radius_ui,
-            kind,
-            points: Vec::with_capacity(1),
-            value_range: None,
-            aggregator,
-            aggregation_factor,
-            min_time,
-            visualizer_instruction_id,
-        };
-        series.push_point(points[0].time, points[0].value);
-        all_series.push(series);
-    } else {
-        add_series_runs(
-            instance_path,
-            visible,
-            series_label,
-            points,
-            aggregator,
-            aggregation_factor,
-            min_time,
-            all_series,
-            visualizer_instruction_id,
-        );
-    }
+    add_series_runs(
+        instance_path,
+        visible,
+        series_label,
+        points,
+        aggregator,
+        aggregation_factor,
+        min_time,
+        all_series,
+        visualizer_instruction_id,
+    );
 }
 
 /// Apply the given aggregation to the provided points.
@@ -244,7 +210,6 @@ pub fn apply_aggregation(
     (actual_aggregation_factor, points)
 }
 
-#[expect(clippy::too_many_arguments)]
 #[expect(clippy::needless_pass_by_value)]
 #[inline(never)] // Better callstacks on crashes
 fn add_series_runs(

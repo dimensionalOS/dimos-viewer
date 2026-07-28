@@ -4,7 +4,7 @@
 //! including all log output.
 //!
 //! This sort of telemetry is always disabled on our OSS binaries, and is only used for
-//! * The Rerun Cloud infrastructure
+//! * The Rerun Hub infrastructure
 //! * Profiling by Rerun developer
 //!
 //! Logging strategy
@@ -49,12 +49,11 @@ mod grpc;
 mod memory_telemetry;
 mod metrics_server;
 mod prometheus;
-#[cfg(feature = "pyo3")]
-mod python_bridge;
 mod shared_reader;
 mod telemetry;
 mod trace_id_format;
 mod tracestate;
+mod tracing_session;
 mod utils;
 
 use std::collections::HashMap;
@@ -63,18 +62,22 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 
 pub use self::args::{LogFormat, TelemetryArgs};
 pub use self::grpc::{
-    BenchmarkIdLayer, ClientTelemetryLayer, GrpcMakeSpan, GrpcOnEos, GrpcOnFirstBodyChunk,
+    ClientOnResponse, ClientTelemetryLayer, GrpcMakeSpan, GrpcOnEos, GrpcOnFirstBodyChunk,
     GrpcOnRequest, GrpcOnResponse, GrpcOnResponseOptions, ServerTelemetryLayer,
     SpanMetadataCleanupLayer, TelemetryLayerOptions, TracingInjectorInterceptor,
     new_client_telemetry_layer, new_server_telemetry_layer,
 };
-pub use self::telemetry::{Telemetry, TelemetryDropBehavior};
+pub use self::telemetry::{Telemetry, TelemetryDropBehavior, is_telemetry_active};
 pub use self::utils::to_short_str;
 
-#[cfg(feature = "pyo3")]
-pub use self::python_bridge::{
-    TRACE_CONTEXT_VAR_NAME, extract_trace_context_from_contextvar, get_trace_context_var,
+pub use self::tracing_session::{
+    RERUN_SESSION_TRACESTATE_KEY, RerunTracingSessionId, current_rerun_session_id,
+    dec_active_tracing_session_count, inc_active_tracing_session_count,
+    with_current_tracing_session, with_tracing_session,
 };
+
+#[cfg(feature = "session_id_reader")]
+pub use self::tracing_session::SessionIdReader;
 
 pub mod external {
     #[cfg(feature = "tracy")]
@@ -139,7 +142,7 @@ impl TraceHeaders {
     pub const TRACEPARENT_KEY: &'static str = "traceparent";
     pub const TRACESTATE_KEY: &'static str = "tracestate";
 
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             traceparent: String::new(),
             tracestate: None,

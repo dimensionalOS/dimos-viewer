@@ -16,7 +16,7 @@ use crate::expanded_rows::ExpandedRowsCache;
 use crate::view_query;
 use crate::visualizer_system::EmptySystem;
 
-#[derive(Default)]
+#[derive(Default, re_byte_size::SizeBytes)]
 struct DataframeViewState {
     /// Cache for the expanded rows.
     expanded_rows_cache: ExpandedRowsCache,
@@ -36,6 +36,10 @@ impl ViewState for DataframeViewState {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn heap_size_bytes(&self) -> u64 {
+        re_byte_size::SizeBytes::heap_size_bytes(self)
+    }
 }
 
 #[derive(Default)]
@@ -43,7 +47,10 @@ pub struct DataframeView;
 
 impl ViewClass for DataframeView {
     fn identifier() -> ViewClassIdentifier {
-        "Dataframe".into()
+        re_viewer_context::external::re_string_interner::intern_static_nonempty!(
+            ViewClassIdentifier,
+            "Dataframe"
+        )
     }
 
     fn recommendation_order(&self) -> i32 {
@@ -175,7 +182,7 @@ Configure in the selection panel:
         let (view_columns, selection) = view_query.apply_column_selection(ctx, &view_columns)?;
         dataframe_query.selection = Some(selection);
 
-        let query_handle = query_engine.query(dataframe_query);
+        let mut query_handle = query_engine.query(dataframe_query);
 
         // Time cursor row — always computed when timelines match (for the visual indicator)
         let timelines_match = timeline.name() == ctx.time_ctrl.timeline_name();
@@ -204,7 +211,7 @@ Configure in the selection panel:
         let hide_column_actions = dataframe_ui(
             &ctx.active_recording_store_view_context(),
             ui,
-            &query_handle,
+            &mut query_handle,
             &mut state.expanded_rows_cache,
             &query.view_id,
             time_cursor_row,

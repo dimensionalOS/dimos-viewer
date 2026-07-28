@@ -9,7 +9,7 @@ import pyarrow.compute as pc
 import pytest
 import rerun as rr
 from inline_snapshot import snapshot as inline_snapshot
-from rerun.experimental import Chunk, LazyChunkStream, Lens, LensOutput, RrdReader, Selector
+from rerun.experimental import Chunk, DeriveLens, LazyChunkStream, MutateLens, RrdReader, Selector
 
 from .conftest import TEST_APP_ID as APP_ID, TEST_RECORDING_ID as RECORDING_ID
 
@@ -24,8 +24,10 @@ if TYPE_CHECKING:
 
 def test_rrd_reader_properties(test_rrd_path: Path) -> None:
     reader = RrdReader(test_rrd_path)
-    assert reader.application_id == APP_ID
-    assert reader.recording_id == RECORDING_ID
+    recs = reader.recordings()
+    assert len(recs) == 1
+    assert recs[0].application_id == APP_ID
+    assert recs[0].recording_id == RECORDING_ID
 
 
 def test_rrd_reader_file_not_found(tmp_path: Path) -> None:
@@ -348,28 +350,22 @@ def test_terminal_does_not_consume(test_rrd_path: Path) -> None:
 def test_lenses_identity(test_rrd_path: Path) -> None:
     """A lens with Selector('.') passes through the struct component data unchanged."""
 
-    lens = Lens(
-        "Imu:accel",
-        LensOutput().to_component("Imu:accel", Selector(".")),
-    )
+    lens = MutateLens("Imu:accel", Selector("."))
 
     store = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lens).collect()
     assert store.summary() == inline_snapshot(
-        "/sensors/imu rows=2 bytes=1.6 KiB static=False timelines=['my_index'] cols=['Imu:accel', 'my_index']"
+        "/sensors/imu rows=2 static=False timelines=['my_index'] cols=['Imu:accel', 'my_index']"
     )
 
 
 def test_lenses_field_selector(test_rrd_path: Path) -> None:
     """A lens with Selector('.x') extracts a struct field and reinterprets it as a Rerun Scalar."""
 
-    lens = Lens(
-        "Imu:accel",
-        LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".x")),
-    )
+    lens = DeriveLens("Imu:accel").to_component(rr.Scalars.descriptor_scalars(), Selector(".x"))
 
     store = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lens).collect()
     assert store.summary() == inline_snapshot(
-        "/sensors/imu rows=2 bytes=1.5 KiB static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']"
+        "/sensors/imu rows=2 static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']"
     )
 
     # Verify the extracted values are correct
@@ -382,28 +378,22 @@ def test_lenses_field_selector(test_rrd_path: Path) -> None:
 def test_lenses_multiple_outputs(test_rrd_path: Path) -> None:
     """A single lens can produce multiple output groups at different entity paths."""
 
-    lens = Lens(
-        "Imu:accel",
-        to_entity={
-            "/out/x": LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".x")),
-            "/out/z": LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".z")),
-        },
-    )
+    lenses = [
+        DeriveLens("Imu:accel", output_entity="/out/x").to_component(rr.Scalars.descriptor_scalars(), Selector(".x")),
+        DeriveLens("Imu:accel", output_entity="/out/z").to_component(rr.Scalars.descriptor_scalars(), Selector(".z")),
+    ]
 
-    store = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lens).collect()
+    store = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lenses).collect()
     assert store.summary() == inline_snapshot("""\
-/out/x rows=2 bytes=1.5 KiB static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']
-/out/z rows=2 bytes=1.5 KiB static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']\
+/out/x rows=2 static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']
+/out/z rows=2 static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']\
 """)
 
 
 def test_lenses_drop_unmatched(test_rrd_path: Path) -> None:
     """With drop_unmatched (default), unmatched chunks are not forwarded."""
 
-    lens = Lens(
-        "nonexistent:Component:foo",
-        LensOutput().to_component("out:Component:bar", Selector(".")),
-    )
+    lens = DeriveLens("nonexistent:Component:foo").to_component("out:Component:bar", Selector("."))
 
     store = RrdReader(test_rrd_path).stream().lenses(lens, output_mode="drop_unmatched").collect()
     assert store.summary() == inline_snapshot("")
@@ -412,11 +402,8 @@ def test_lenses_drop_unmatched(test_rrd_path: Path) -> None:
 def test_lenses_forward_unmatched(test_rrd_path: Path) -> None:
     """With forward_unmatched, transformed chunks replace originals and unmatched chunks pass through."""
 
-    lens = Lens(
-        "Imu:accel",
-        to_entity={
-            "/transformed": LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".x")),
-        },
+    lens = DeriveLens("Imu:accel", output_entity="/transformed").to_component(
+        rr.Scalars.descriptor_scalars(), Selector(".x")
     )
 
     store = (
@@ -427,21 +414,18 @@ def test_lenses_forward_unmatched(test_rrd_path: Path) -> None:
         .collect()
     )
     assert store.summary() == inline_snapshot("""\
-/cameras/front rows=1 bytes=1.5 KiB static=False timelines=['my_index'] cols=['TextLog:text', 'my_index']
-/config rows=1 bytes=1.1 KiB static=True timelines=[] cols=['TextLog:text']
-/robots/arm rows=2 bytes=1.6 KiB static=False timelines=['my_index', 'other_timeline'] cols=['Points3D:colors', 'Points3D:positions', 'my_index', 'other_timeline']
-/transformed rows=2 bytes=1.5 KiB static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']\
+/cameras/front rows=1 static=False timelines=['my_index'] cols=['TextLog:text', 'my_index']
+/config rows=1 static=True timelines=[] cols=['TextLog:text']
+/robots/arm rows=2 static=False timelines=['my_index', 'other_timeline'] cols=['Points3D:colors', 'Points3D:positions', 'my_index', 'other_timeline']
+/transformed rows=2 static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']\
 """)
 
 
 def test_lenses_forward_all(test_rrd_path: Path) -> None:
     """With forward_all, both transformed and original data are forwarded."""
 
-    lens = Lens(
-        "Imu:accel",
-        to_entity={
-            "/transformed": LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".x")),
-        },
+    lens = DeriveLens("Imu:accel", output_entity="/transformed").to_component(
+        rr.Scalars.descriptor_scalars(), Selector(".x")
     )
 
     store = (
@@ -452,21 +436,18 @@ def test_lenses_forward_all(test_rrd_path: Path) -> None:
         .collect()
     )
     assert store.summary() == inline_snapshot("""\
-/cameras/front rows=1 bytes=1.5 KiB static=False timelines=['my_index'] cols=['TextLog:text', 'my_index']
-/config rows=1 bytes=1.1 KiB static=True timelines=[] cols=['TextLog:text']
-/robots/arm rows=2 bytes=1.6 KiB static=False timelines=['my_index', 'other_timeline'] cols=['Points3D:colors', 'Points3D:positions', 'my_index', 'other_timeline']
-/sensors/imu rows=2 bytes=1.6 KiB static=False timelines=['my_index'] cols=['Imu:accel', 'my_index']
-/transformed rows=2 bytes=1.5 KiB static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']\
+/cameras/front rows=1 static=False timelines=['my_index'] cols=['TextLog:text', 'my_index']
+/config rows=1 static=True timelines=[] cols=['TextLog:text']
+/robots/arm rows=2 static=False timelines=['my_index', 'other_timeline'] cols=['Points3D:colors', 'Points3D:positions', 'my_index', 'other_timeline']
+/sensors/imu rows=2 static=False timelines=['my_index'] cols=['Imu:accel', 'my_index']
+/transformed rows=2 static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']\
 """)
 
 
 def test_lenses_consumes_stream(test_rrd_path: Path) -> None:
     """Calling .lenses() consumes the stream (move semantics)."""
 
-    lens = Lens(
-        "Imu:accel",
-        LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".x")),
-    )
+    lens = DeriveLens("Imu:accel").to_component(rr.Scalars.descriptor_scalars(), Selector(".x"))
 
     stream = RrdReader(test_rrd_path).stream()
     _transformed = stream.lenses(lens)
@@ -478,25 +459,19 @@ def test_lenses_consumes_stream(test_rrd_path: Path) -> None:
 def test_lenses_chained_with_filter(test_rrd_path: Path) -> None:
     """Lenses can be composed with filter in a pipeline."""
 
-    lens = Lens(
-        "Imu:accel",
-        LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".z")),
-    )
+    lens = DeriveLens("Imu:accel").to_component(rr.Scalars.descriptor_scalars(), Selector(".z"))
 
     store = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lens).collect()
     assert store.summary() == inline_snapshot(
-        "/sensors/imu rows=2 bytes=1.5 KiB static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']"
+        "/sensors/imu rows=2 static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']"
     )
 
 
 def test_lenses_content_filter_match(test_rrd_path: Path) -> None:
     """With `content` set to a matching path, lenses apply only to those chunks; others pass through."""
 
-    lens = Lens(
-        "Imu:accel",
-        to_entity={
-            "/transformed": LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".x")),
-        },
+    lens = DeriveLens("Imu:accel", output_entity="/transformed").to_component(
+        rr.Scalars.descriptor_scalars(), Selector(".x")
     )
 
     store = (
@@ -509,21 +484,18 @@ def test_lenses_content_filter_match(test_rrd_path: Path) -> None:
     # /sensors/imu was matched by content -> lens applied -> produced /transformed.
     # All other chunks pass through unchanged regardless of `drop_unmatched`.
     assert store.summary() == inline_snapshot("""\
-/cameras/front rows=1 bytes=1.5 KiB static=False timelines=['my_index'] cols=['TextLog:text', 'my_index']
-/config rows=1 bytes=1.1 KiB static=True timelines=[] cols=['TextLog:text']
-/robots/arm rows=2 bytes=1.6 KiB static=False timelines=['my_index', 'other_timeline'] cols=['Points3D:colors', 'Points3D:positions', 'my_index', 'other_timeline']
-/transformed rows=2 bytes=1.5 KiB static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']\
+/cameras/front rows=1 static=False timelines=['my_index'] cols=['TextLog:text', 'my_index']
+/config rows=1 static=True timelines=[] cols=['TextLog:text']
+/robots/arm rows=2 static=False timelines=['my_index', 'other_timeline'] cols=['Points3D:colors', 'Points3D:positions', 'my_index', 'other_timeline']
+/transformed rows=2 static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']\
 """)
 
 
 def test_lenses_content_filter_excludes_lens_target(test_rrd_path: Path) -> None:
     """Chunks outside the `content` scope bypass the lens and pass through, regardless of output_mode."""
 
-    lens = Lens(
-        "Imu:accel",
-        to_entity={
-            "/transformed": LensOutput().to_component(rr.Scalars.descriptor_scalars(), Selector(".x")),
-        },
+    lens = DeriveLens("Imu:accel", output_entity="/transformed").to_component(
+        rr.Scalars.descriptor_scalars(), Selector(".x")
     )
 
     # Content scope only includes /robots/**, so /sensors/imu is bypassed entirely
@@ -546,10 +518,7 @@ def test_lenses_content_filter_excludes_lens_target(test_rrd_path: Path) -> None
 def test_lenses_invalid_output_mode(test_rrd_path: Path) -> None:
     """Invalid output_mode string raises ValueError."""
 
-    lens = Lens(
-        "Points3D:positions",
-        LensOutput().to_component("Points3D:positions", Selector(".")),
-    )
+    lens = DeriveLens("Points3D:positions").to_component("Points3D:positions", Selector("."))
 
     with pytest.raises(ValueError, match="Unknown output_mode"):
         RrdReader(test_rrd_path).stream().lenses(lens, output_mode="invalid")  # type: ignore[arg-type]
@@ -558,16 +527,15 @@ def test_lenses_invalid_output_mode(test_rrd_path: Path) -> None:
 def test_lenses_time_extraction(test_rrd_path: Path) -> None:
     """A lens can extract a timestamp field from a struct component as a new timeline."""
 
-    lens = Lens(
-        "Imu:accel",
-        LensOutput()
+    lens = (
+        DeriveLens("Imu:accel")
         .to_component(rr.Scalars.descriptor_scalars(), Selector(".x"))
-        .to_timeline("sensor_time", "timestamp_ns", Selector(".timestamp")),
+        .to_timeline("sensor_time", "timestamp_ns", Selector(".timestamp"))
     )
 
     store = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lens).collect()
     assert store.summary() == inline_snapshot(
-        "/sensors/imu rows=2 bytes=1.5 KiB static=False timelines=['my_index', 'sensor_time'] cols=['Scalars:scalars', 'my_index', 'sensor_time']"
+        "/sensors/imu rows=2 static=False timelines=['my_index', 'sensor_time'] cols=['Scalars:scalars', 'my_index', 'sensor_time']"
     )
 
     chunks = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lens).to_chunks()
@@ -584,14 +552,11 @@ def test_lenses_dynamic_selector(test_rrd_path: Path) -> None:
 
     selector = Selector(".x").pipe(lambda arr: pc.multiply(arr, 2.0))
 
-    lens = Lens(
-        "Imu:accel",
-        LensOutput().to_component(rr.Scalars.descriptor_scalars(), selector),
-    )
+    lens = DeriveLens("Imu:accel").to_component(rr.Scalars.descriptor_scalars(), selector)
 
     store = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lens).collect()
     assert store.summary() == inline_snapshot(
-        "/sensors/imu rows=2 bytes=1.5 KiB static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']"
+        "/sensors/imu rows=2 static=False timelines=['my_index'] cols=['Scalars:scalars', 'my_index']"
     )
 
     chunks = RrdReader(test_rrd_path).stream().filter(content="/sensors/**").lenses(lens).to_chunks()

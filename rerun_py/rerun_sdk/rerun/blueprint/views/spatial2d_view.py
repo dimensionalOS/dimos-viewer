@@ -43,8 +43,15 @@ class Spatial2DView(View):
     n = 150
     angle = np.linspace(0, 10 * np.pi, n)
     spiral_radius = np.linspace(0.0, 3.0, n) ** 2
-    positions = np.column_stack((np.cos(angle) * spiral_radius, np.sin(angle) * spiral_radius))
-    colors = np.dstack((np.linspace(255, 255, n), np.linspace(255, 0, n), np.linspace(0, 255, n)))[0].astype(int)
+    positions = np.column_stack((
+        np.cos(angle) * spiral_radius,
+        np.sin(angle) * spiral_radius,
+    ))
+    colors = np.dstack((
+        np.linspace(255, 255, n),
+        np.linspace(255, 0, n),
+        np.linspace(0, 255, n),
+    ))[0].astype(int)
     radii = np.linspace(0.01, 0.7, n)
 
     rr.log("points", rr.Points2D(positions, colors=colors, radii=radii))
@@ -91,6 +98,7 @@ class Spatial2DView(View):
         | blueprint_components.BackgroundKindLike
         | None = None,
         visual_bounds: blueprint_archetypes.VisualBounds2D | None = None,
+        spatial_information: blueprint_archetypes.SpatialInformation | None = None,
         time_ranges: blueprint_archetypes.VisibleTimeRanges
         | datatypes.VisibleTimeRangeLike
         | Sequence[datatypes.VisibleTimeRangeLike]
@@ -140,6 +148,8 @@ class Spatial2DView(View):
 
             Everything within these bounds are guaranteed to be visible.
             Somethings outside of these bounds may also be visible due to letterboxing.
+        spatial_information:
+            Configuration of spatial information shown in the view.
         time_ranges:
             Configures which range on each timeline is shown by this view (unless specified differently per entity).
 
@@ -158,6 +168,11 @@ class Spatial2DView(View):
             if not isinstance(visual_bounds, blueprint_archetypes.VisualBounds2D):
                 visual_bounds = blueprint_archetypes.VisualBounds2D(visual_bounds)
             properties["VisualBounds2D"] = visual_bounds
+
+        if spatial_information is not None:
+            if not isinstance(spatial_information, blueprint_archetypes.SpatialInformation):
+                spatial_information = blueprint_archetypes.SpatialInformation(spatial_information)
+            properties["SpatialInformation"] = spatial_information
 
         if time_ranges is not None:
             if not isinstance(time_ranges, blueprint_archetypes.VisibleTimeRanges):
