@@ -15,7 +15,7 @@ use re_time_panel::__bench::{
 
 fn run(b: &mut Bencher<'_, WallTime>, config: DensityGraphBuilderConfig, entry: ChunkEntry) {
     egui::__run_test_ui(|ui| {
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let row_rect = ui.max_rect();
             assert!(row_rect.width() > 100.0 && row_rect.height() > 100.0);
 
@@ -119,7 +119,7 @@ fn add_data(
         );
 
         // transforms
-        for (time, component) in log_times.iter().zip(components) {
+        for (time, component) in std::iter::zip(&log_times, components) {
             chunk = chunk.with_archetype(
                 re_chunk_store::RowId::new(),
                 re_log_types::TimePoint::default().with(

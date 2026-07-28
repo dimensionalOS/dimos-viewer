@@ -13,20 +13,20 @@ use re_chunk::EntityPath;
 
 use crate::graph::{EdgeId, Graph, NodeId};
 
-#[derive(PartialEq)]
+#[derive(PartialEq, re_byte_size::SizeBytes)]
 pub(super) struct NodeTemplate {
     pub(super) size: Vec2,
     pub(super) fixed_position: Option<Pos2>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, re_byte_size::SizeBytes)]
 pub struct EdgeTemplate {
     pub source: NodeId,
     pub target: NodeId,
     pub target_arrow: bool,
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, re_byte_size::SizeBytes)]
 pub(super) struct GraphTemplate {
     pub(super) nodes: BTreeMap<NodeId, NodeTemplate>,
 
@@ -39,7 +39,7 @@ pub(super) struct GraphTemplate {
 /// A [`LayoutRequest`] encapsulates all the information that is considered when computing a layout.
 ///
 /// It implements [`PartialEq`] to check if a layout is up-to-date, or if it needs to be recomputed.
-#[derive(PartialEq)]
+#[derive(PartialEq, re_byte_size::SizeBytes)]
 pub struct LayoutRequest {
     pub(super) graphs: BTreeMap<EntityPath, GraphTemplate>,
 }

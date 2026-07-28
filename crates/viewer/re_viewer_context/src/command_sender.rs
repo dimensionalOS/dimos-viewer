@@ -6,7 +6,7 @@ use re_chunk_store::external::re_chunk::Chunk;
 use re_data_source::LogDataSource;
 use re_log_channel::LogReceiver;
 use re_log_types::StoreId;
-use re_ui::{UICommand, UICommandSender};
+use re_ui::{RecordingCommand, RecordingCommandSender, UICommand, UICommandSender};
 
 use crate::time_control::TimeControlCommand;
 use crate::{AuthContext, RecordingOrTable, Route, ScreenshotTarget, ViewId};
@@ -34,11 +34,28 @@ pub enum SystemCommand {
     /// Add a new server to the redap browser.
     AddRedapServer(re_uri::Origin),
 
+    /// Refresh the whole catalog (all datasets & tables) of an already-known redap server.
+    RefreshRedapServer(re_uri::Origin),
+
+    /// Refresh the contents of a single entry (dataset or table) on a redap server.
+    RefreshRedapEntry {
+        origin: re_uri::Origin,
+        entry_id: re_log_types::EntryId,
+    },
+
     /// Remove a server from the redap browser and clean up associated blueprints.
     RemoveRedapServer(re_uri::Origin),
 
     /// Open a modal to edit this redap server.
     EditRedapServerModal(EditRedapServerModalCommand),
+
+    /// A command acting on a specific redap server,
+    /// e.g. from the command palette or a server context menu.
+    RedapServer(re_ui::RedapServerCommand),
+
+    /// A command acting on a specific redap entry (dataset or table),
+    /// e.g. from the command palette or a keyboard shortcut.
+    Table(re_ui::TableCommand),
 
     /// Activates the setting route.
     OpenSettings,
@@ -146,9 +163,14 @@ pub enum SystemCommand {
     /// Show a notification to the user
     ShowNotification(re_ui::notifications::Notification),
 
-    /// Start polling a texture we're reading back from the gpu, and then prompt
-    /// the user to save a png of the texture.
-    ReadbackAndSaveTexture(re_renderer::texture_readback::TextureReadbackId),
+    /// Start polling a texture we're reading back from the gpu.
+    /// Then depending on the given action either:
+    /// - Prompt the user to save a png of the texture.
+    /// - Copy the png to the clipboard.
+    ReadbackAndSaveTexture {
+        texture: re_renderer::texture_readback::TextureReadbackId,
+        action: DownloadAction,
+    },
 
     /// Add a task, run on a background thread, that saves something to disk.
     #[cfg(not(target_arch = "wasm32"))]
@@ -163,7 +185,7 @@ pub enum SystemCommand {
         email: String,
     },
 
-    /// Logout from rerun cloud
+    /// Logout from Rerun Hub
     Logout,
 
     /// Save a screenshot to a file.
@@ -174,6 +196,9 @@ pub enum SystemCommand {
         /// Optional view id to screenshot a specific view.
         /// If None, screenshots the entire viewer.
         view_id: Option<ViewId>,
+
+        /// Whether to show a user-facing notification (info toast) when the screenshot is done.
+        notify: bool,
     },
 }
 
@@ -185,6 +210,12 @@ impl SystemCommand {
     pub fn set_selection(selection: impl Into<SetSelection>) -> Self {
         Self::SetSelection(selection.into())
     }
+}
+
+/// What to do with a download.
+pub enum DownloadAction {
+    CopyToClipboard,
+    Save,
 }
 
 /// What triggered this item to be selected?
@@ -252,12 +283,14 @@ pub type StaticLocation = &'static Location<'static>;
 pub struct CommandSender {
     system_sender: crossbeam::channel::Sender<(StaticLocation, SystemCommand)>,
     ui_sender: crossbeam::channel::Sender<UICommand>,
+    recording_sender: crossbeam::channel::Sender<RecordingCommand>,
 }
 
 /// Receiver for the [`CommandSender`]
 pub struct CommandReceiver {
     system_receiver: crossbeam::channel::Receiver<(StaticLocation, SystemCommand)>,
     ui_receiver: crossbeam::channel::Receiver<UICommand>,
+    recording_receiver: crossbeam::channel::Receiver<RecordingCommand>,
 }
 
 impl CommandReceiver {
@@ -276,6 +309,13 @@ impl CommandReceiver {
         // is if the sender has been dropped.
         self.ui_receiver.try_recv().ok()
     }
+
+    /// Receive a [`RecordingCommand`] to be executed if any is queued.
+    pub fn recv_recording(&self) -> Option<RecordingCommand> {
+        // The only way this can fail (other than being empty)
+        // is if the sender has been dropped.
+        self.recording_receiver.try_recv().ok()
+    }
 }
 
 /// Creates a new command channel.
@@ -285,14 +325,17 @@ pub fn command_channel() -> (CommandSender, CommandReceiver) {
     #![cfg_attr(not(target_arch = "wasm32"), expect(clippy::disallowed_methods))]
     let (system_sender, system_receiver) = crossbeam::channel::unbounded();
     let (ui_sender, ui_receiver) = crossbeam::channel::unbounded();
+    let (recording_sender, recording_receiver) = crossbeam::channel::unbounded();
     (
         CommandSender {
             system_sender,
             ui_sender,
+            recording_sender,
         },
         CommandReceiver {
             system_receiver,
             ui_receiver,
+            recording_receiver,
         },
     )
 }
@@ -313,6 +356,26 @@ impl UICommandSender for CommandSender {
     fn send_ui(&self, command: UICommand) {
         // The only way this can fail is if the receiver has been dropped.
         re_quota_channel::send_crossbeam(&self.ui_sender, command).ok();
+    }
+}
+
+impl RecordingCommandSender for CommandSender {
+    /// Send a command to be executed.
+    fn send_recording_command(&self, command: RecordingCommand) {
+        // The only way this can fail is if the receiver has been dropped.
+        re_quota_channel::send_crossbeam(&self.recording_sender, command).ok();
+    }
+}
+
+impl re_ui::RedapServerCommandSender for CommandSender {
+    fn send_redap_server_command(&self, command: re_ui::RedapServerCommand) {
+        self.send_system(SystemCommand::RedapServer(command));
+    }
+}
+
+impl re_ui::TableCommandSender for CommandSender {
+    fn send_table_command(&self, command: re_ui::TableCommand) {
+        self.send_system(SystemCommand::Table(command));
     }
 }
 

@@ -113,7 +113,7 @@ fn grid_content_ui(ctx: &AppContext<'_>, db: &EntityDb, ui: &mut egui::Ui, ui_la
     }) = &db.data_source
     {
         ui.grid_left_hand_label("Segment ID");
-        ui.label(segment_id);
+        ui.label(segment_id.to_string());
         ui.end_row();
     }
 
@@ -220,16 +220,16 @@ fn grid_content_ui(ctx: &AppContext<'_>, db: &EntityDb, ui: &mut egui::Ui, ui_la
             let current_size = format_bytes(current_size_bytes as _);
             let max_downloaded = format_bytes(max_downloaded_bytes as _);
 
-            ui.horizontal(|ui| {
-                let mut num_root_chunks = 0_usize;
-                let mut num_fully_loaded = 0_usize;
-                for info in db.rrd_manifest_index().root_chunks() {
-                    num_root_chunks += 1;
-                    if info.is_fully_loaded() {
-                        num_fully_loaded += 1;
-                    }
+            let mut num_root_chunks = 0_usize;
+            let mut num_fully_loaded = 0_usize;
+            for info in db.rrd_manifest_index().root_chunks() {
+                num_root_chunks += 1;
+                if info.is_fully_loaded() {
+                    num_fully_loaded += 1;
                 }
+            }
 
+            ui.horizontal(|ui| {
                 if db.redap_connection_state() == RedapConnectionState::PartialManifest {
                     ui.label(format!("{current_size} / ?"));
                     ui.label(format!("({} / ? chunks)", format_uint(num_fully_loaded)));
@@ -259,6 +259,16 @@ fn grid_content_ui(ctx: &AppContext<'_>, db: &EntityDb, ui: &mut egui::Ui, ui_la
             });
 
             ui.end_row();
+
+            // ----
+
+            if 0 < num_root_chunks {
+                ui.grid_left_hand_label("Avg chunk size")
+                    .on_hover_text("On remote");
+                let avg_chunk_size_bytes = full_size_bytes as f64 / num_root_chunks as f64;
+                ui.label(format_bytes(avg_chunk_size_bytes));
+                ui.end_row();
+            }
         }
     }
 
@@ -295,7 +305,7 @@ fn grid_content_ui(ctx: &AppContext<'_>, db: &EntityDb, ui: &mut egui::Ui, ui_la
             chunk_max_rows_if_unsorted,
         } = db.storage_engine().store().config();
 
-        ui.grid_left_hand_label("Compaction");
+        ui.grid_left_hand_label("Compaction config");
         ui.label(format!(
             "{} rows ({} if unsorted) or {}",
             re_format::format_uint(chunk_max_rows),

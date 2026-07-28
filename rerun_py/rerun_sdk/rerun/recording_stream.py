@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast, overload
 
 from typing_extensions import Self
 
-import rerun as rr
 from rerun import bindings
 from rerun_bindings import ChunkBatcherConfig as ChunkBatcherConfig  # noqa: TC001
+
+from ._send_dataframe import AUTO_INDEX, _AutoIndex
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -25,10 +26,11 @@ if TYPE_CHECKING:
 
     from rerun import AsComponents, BlueprintLike, ComponentColumn, DescribedComponentBatch as DescribedComponentBatch
     from rerun._memory import MemoryRecording
+    from rerun.experimental import Chunk, ChunkStore, LazyChunkStream, LazyStore
+    from rerun.experimental._chunk import DataframeLike
     from rerun.sinks import LogSinkLike
 
     from ._send_columns import TimeColumnLike as TimeColumnLike
-
 
 # TODO(#3793): defaulting recording_id to authkey should be opt-in
 
@@ -178,6 +180,14 @@ class RecordingStream:
     Flushing or context manager exit guarantees that all previous data sent by the calling thread
     has been recorded and (if applicable) flushed to the underlying OS-managed file descriptor,
     but other threads may still have data in flight.
+
+    On context manager exit, file-like sinks (e.g. those created by [`rerun.RecordingStream.save`][])
+    are also finalized so the resulting `.rrd` is consumable immediately — without this, the file's
+    footer would only be written when the `RecordingStream` is garbage-collected. Streaming sinks
+    (e.g. [`rerun.RecordingStream.connect_grpc`][], [`rerun.RecordingStream.serve_grpc`][]) are left
+    intact and continue to receive data after the `with`-block exits. After a file-like sink has
+    been finalized this way, subsequent log calls on the same `RecordingStream` go to a buffered
+    sink until a new sink is attached.
 
     See also: [`rerun.get_data_recording`][], [`rerun.get_global_data_recording`][],
     [`rerun.get_thread_local_data_recording`][].
@@ -361,6 +371,10 @@ class RecordingStream:
     ) -> None:
         self.flush()
 
+        # Finalize file-like sinks (e.g. `save()`) so the resulting `.rrd` is consumable as soon as
+        # the `with`-block exits. Streaming sinks like gRPC are left untouched.
+        bindings.finalize_deferred_sinks(recording=self.to_native())
+
         current_recording = active_recording_stream.get(None)
 
         # Restore the context state
@@ -515,7 +529,13 @@ class RecordingStream:
 
         connect_grpc(url, default_blueprint=default_blueprint, recording=self)
 
-    def save(self, path: str | Path, default_blueprint: BlueprintLike | None = None) -> None:
+    def save(
+        self,
+        path: str | Path,
+        default_blueprint: BlueprintLike | None = None,
+        *,
+        write_footer: bool = True,
+    ) -> None:
         """
         Stream all log-data to a file.
 
@@ -534,14 +554,26 @@ class RecordingStream:
             already has an active blueprint, the new blueprint won't become active until the user
             clicks the "reset blueprint" button. If you want to activate the new blueprint
             immediately, instead use the [`rerun.send_blueprint`][] API.
+        write_footer:
+            Whether to emit a complete RRD footer (including a manifest of every chunk) at the
+            end of the stream. Defaults to `True`. See [`rerun.save`][] for details and
+            trade-offs (notably memory usage in long-running streaming sessions).
+
+            *Warning*: lack of footer will significantly hurt random-access performance and some
+            tools (e.g. LazyStore) may not work properly.
 
         """
 
         from .sinks import save
 
-        save(path, default_blueprint, recording=self)
+        save(path, default_blueprint, recording=self, write_footer=write_footer)
 
-    def stdout(self, default_blueprint: BlueprintLike | None = None) -> None:
+    def stdout(
+        self,
+        default_blueprint: BlueprintLike | None = None,
+        *,
+        write_footer: bool = True,
+    ) -> None:
         """
         Stream all log-data to stdout.
 
@@ -559,12 +591,18 @@ class RecordingStream:
             already has an active blueprint, the new blueprint won't become active until the user
             clicks the "reset blueprint" button. If you want to activate the new blueprint
             immediately, instead use the [`rerun.send_blueprint`][] API.
+        write_footer:
+            Whether to emit a complete RRD footer (including a manifest of every chunk) at the
+            end of the stream. Defaults to `True`. See [`rerun.save`][] for details.
+
+            *Warning*: lack of footer will significantly hurt random-access performance and some
+            tools (e.g. LazyStore) may not work properly.
 
         """
 
         from .sinks import stdout
 
-        stdout(default_blueprint, recording=self)
+        stdout(default_blueprint, recording=self, write_footer=write_footer)
 
     def memory_recording(self) -> MemoryRecording:
         """
@@ -688,24 +726,6 @@ class RecordingStream:
         from .sinks import send_blueprint
 
         send_blueprint(blueprint=blueprint, make_active=make_active, make_default=make_default, recording=self)
-
-    def send_recording(self, recording: rr.recording.Recording) -> None:
-        """
-        Send a `Recording` loaded from a `.rrd` to the `RecordingStream`.
-
-        !!! Warning
-            ⚠️ This API is experimental and may change or be removed in future versions! ⚠️
-
-        Parameters
-        ----------
-        recording:
-            A `Recording` loaded from a `.rrd`.
-
-        """
-
-        from .sinks import send_recording
-
-        send_recording(rrd=recording, recording=self)
 
     def spawn(
         self,
@@ -949,6 +969,38 @@ class RecordingStream:
 
         bindings.reset_time(recording=self.to_native())
 
+    def set_log_tick_enabled(self, enabled: bool) -> None:
+        """
+        Enable or disable automatic injection of the `log_tick` timeline into logged data.
+
+        `log_tick` is a per-recording counter that increments on every logging call.
+        It is **disabled** by default (it can also be controlled via the `RERUN_LOG_TICK` environment variable).
+
+        Parameters
+        ----------
+        enabled:
+            Whether to inject the `log_tick` timeline.
+
+        """
+
+        bindings.set_log_tick_enabled(enabled, recording=self.to_native())
+
+    def set_log_time_enabled(self, enabled: bool) -> None:
+        """
+        Enable or disable automatic injection of the `log_time` timeline into logged data.
+
+        `log_time` is the wall-clock time at which data was logged.
+        It is **enabled** by default (it can also be controlled via the `RERUN_LOG_TIME` environment variable).
+
+        Parameters
+        ----------
+        enabled:
+            Whether to inject the `log_time` timeline.
+
+        """
+
+        bindings.set_log_time_enabled(enabled, recording=self.to_native())
+
     def log(
         self,
         entity_path: str | list[object],
@@ -1015,7 +1067,7 @@ class RecordingStream:
             Static data has no time associated with it, exists on all timelines, and unconditionally shadows
             any temporal data of the same type.
 
-            Otherwise, the data will be timestamped automatically with `log_time` and `log_tick`.
+            Otherwise, the data will be timestamped automatically with `log_time` (and `log_tick`, if enabled).
             Additional timelines set by [`rerun.RecordingStream.set_time`][] will also be included.
 
         strict:
@@ -1064,7 +1116,7 @@ class RecordingStream:
             Static data has no time associated with it, exists on all timelines, and unconditionally shadows
             any temporal data of the same type.
 
-            Otherwise, the data will be timestamped automatically with `log_time` and `log_tick`.
+            Otherwise, the data will be timestamped automatically with `log_time` (and `log_tick`, if enabled).
             Additional timelines set by [`rerun.RecordingStream.set_time`][] will also be included.
 
         """
@@ -1110,7 +1162,7 @@ class RecordingStream:
             Static data has no time associated with it, exists on all timelines, and unconditionally shadows
             any temporal data of the same type.
 
-            Otherwise, the data will be timestamped automatically with `log_time` and `log_tick`.
+            Otherwise, the data will be timestamped automatically with `log_time` (and `log_tick`, if enabled).
             Additional timelines set by [`rerun.RecordingStream.set_time`][] will also be included.
 
         """
@@ -1169,27 +1221,103 @@ class RecordingStream:
 
         send_columns(entity_path=entity_path, indexes=indexes, columns=columns, strict=strict, recording=self)
 
-    def send_chunk(self, chunk: rr.experimental.Chunk) -> None:
-        """Send a pre-built [`Chunk`][rerun.experimental.Chunk] to this recording stream."""
+    def send_chunks(
+        self,
+        chunks: Chunk | LazyChunkStream | LazyStore | ChunkStore | Iterable[Chunk],
+    ) -> None:
+        """
+        Send chunks to this recording stream. Blocks until every chunk has been queued.
 
-        from .experimental._send_chunk import send_chunk
+        See [`rerun.experimental.send_chunks`][].
 
-        send_chunk(chunk, recording=self)
+        !!! note
+            For a `LazyChunkStream` and `LazyStore` inputs, this call triggers execution
+            and/or loading and will block for the duration of this process.
 
-    def send_record_batch(self, batch: pa.RecordBatch) -> None:
-        """Coerce a single pyarrow `RecordBatch` to Rerun structure."""
+        Parameters
+        ----------
+        chunks:
+            One of:
 
+            - A single [`Chunk`][rerun.experimental.Chunk].
+            - A [`LazyChunkStream`][rerun.experimental.LazyChunkStream] — consume
+              the stream and forward all chunks to this recording stream.
+            - A [`LazyStore`][rerun.experimental.LazyStore] — send all chunks to this
+              recording stream. This triggers loading all chunks from the source.
+            - A [`ChunkStore`][rerun.experimental.ChunkStore] — send all chunks to
+              this recording stream (fast since all chunks are already loaded).
+            - Any iterable of `Chunk` objects.
+
+            Source store identity (`application_id`, `recording_id`) is **not**
+            preserved: chunks adopt this recording's identity.
+
+        """
+        from .experimental._send_chunks import send_chunks
+
+        send_chunks(chunks, recording=self)
+
+    def send_record_batch(
+        self,
+        batch: pa.RecordBatch,
+        *,
+        index: str | list[str] | None | _AutoIndex = AUTO_INDEX,
+        entity_path: str | None = None,
+    ) -> None:
+        """
+        Coerce a single pyarrow `RecordBatch` to Rerun structure and log it.
+
+        A thin wrapper over [`Chunk.from_record_batch`][rerun.experimental.Chunk.from_record_batch]
+        followed by [`send_chunks`][rerun.experimental.send_chunks]. See `Chunk.from_record_batch` for
+        the full column-classification semantics and the conditions under which a `ValueError` is raised.
+
+        Parameters
+        ----------
+        batch:
+            The Arrow record batch to interpret.
+        index:
+            Determines which columns are index (timeline) columns. See
+            [`Chunk.from_record_batch`][rerun.experimental.Chunk.from_record_batch] for the full
+            semantics. Defaults to deriving the index from the batch's Rerun metadata.
+        entity_path:
+            Default entity path for component columns that do not otherwise specify one.
+
+        """
         from ._send_dataframe import send_record_batch
 
-        send_record_batch(batch, recording=self)
+        send_record_batch(batch, recording=self, index=index, entity_path=entity_path)
 
-    # TODO(RR-3198): this should accept a `datafusion.DataFrame` as a soft dependency
-    def send_dataframe(self, df: pa.RecordBatchReader | pa.Table) -> None:
-        """Coerce a pyarrow `RecordBatchReader` or `Table` to Rerun structure."""
+    def send_dataframe(
+        self,
+        df: DataframeLike,
+        *,
+        index: str | list[str] | None | _AutoIndex = AUTO_INDEX,
+        entity_path: str | None = None,
+    ) -> None:
+        """
+        Coerce a pyarrow `Table` / `RecordBatch` / `RecordBatchReader`, or a datafusion `DataFrame`, to Rerun structure and log it.
 
+        A thin wrapper over [`Chunk.from_dataframe`][rerun.experimental.Chunk.from_dataframe] followed by
+        [`send_chunks`][rerun.experimental.send_chunks]. See `Chunk.from_dataframe` for the accepted input
+        types, and `Chunk.from_record_batch` for the full column-classification semantics and the
+        conditions under which a `ValueError` is raised.
+
+        Parameters
+        ----------
+        df:
+            The dataframe to interpret. Must be a pyarrow `Table`, pyarrow `RecordBatch`, pyarrow
+            `RecordBatchReader`, or datafusion `DataFrame` (an optional dependency) — each has a
+            single fixed schema.
+        index:
+            Determines which columns are index (timeline) columns. See
+            [`Chunk.from_record_batch`][rerun.experimental.Chunk.from_record_batch] for the full
+            semantics. Defaults to deriving the index from the dataframe's Rerun metadata.
+        entity_path:
+            Default entity path for component columns that do not otherwise specify one.
+
+        """
         from ._send_dataframe import send_dataframe
 
-        send_dataframe(df, recording=self)
+        send_dataframe(df, recording=self, index=index, entity_path=entity_path)
 
     def __str__(self) -> str:
         return str(self.inner)

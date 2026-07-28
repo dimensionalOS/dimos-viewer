@@ -178,21 +178,8 @@ impl UrdfTree {
                 .with_frame(self.apply_frame_prefix(&self.root().name)),
         )?;
 
-        // Bridge the prefixed root frame to the entity hierarchy: a Transform3D with only
-        // child_frame defaults its parent to the entity's implicit parent frame (tf#/…).
-        if self.frame_prefix().is_some() {
-            emit_archetype(
-                emit,
-                self.log_paths.root.clone(),
-                timepoint,
-                &Transform3D::update_fields()
-                    .with_child_frame(self.apply_frame_prefix(&self.root().name)),
-            )?;
-        }
-
-        let transforms = walk_tree(emit, self, timepoint, &self.root().name)?;
-
         // Emit all transforms as rows in a single chunk.
+        let transforms = walk_tree(emit, self, timepoint, &self.root().name)?;
         if include_joint_transforms && !transforms.is_empty() {
             emit_static_transforms_batch(emit, &self.log_paths.transforms, &transforms)?;
         }
@@ -626,9 +613,7 @@ fn resolve_package_uri(uri: &str) -> anyhow::Result<PathBuf> {
     use std::env;
 
     let mut parts = uri.splitn(2, '/');
-    let (pkg, rel) = parts
-        .next()
-        .and_then(|pkg| parts.next().map(|rel| (pkg, rel)))
+    let (pkg, rel) = Option::zip(parts.next(), parts.next())
         .ok_or_else(|| anyhow::anyhow!("Invalid package URI: {uri}"))?;
 
     let rel = PathBuf::from(rel);

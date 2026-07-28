@@ -2,22 +2,22 @@ use std::collections::BTreeMap;
 
 use re_chunk::{Chunk, EntityPath, RowId, TimePoint};
 use re_sdk_types::{
-    Component as _, ComponentBatch as _, ComponentDescriptor, SerializedComponentBatch, components,
-    datatypes,
+    Component as _, ComponentBatch as _, ComponentDescriptor, ComponentIdentifier,
+    SerializedComponentBatch, components, datatypes,
 };
 
-use super::{Decoder, DecoderIdentifier};
+use super::{Decoder, DecoderContext, DecoderIdentifier};
 use crate::Error;
 
 /// Extracts [`mcap::records::Metadata`] records from an MCAP file as a single static chunk.
 ///
-/// Outputs a single `McapMetadata` archetype at [`EntityPath::properties()`],
-/// with one [`components::KeyValuePairs`] component per metadata record.
+/// Outputs a single `McapMetadata` archetype at `__mcap_metadata`, with one
+/// [`components::KeyValuePairs`] component per metadata record.
 #[derive(Debug, Default)]
 pub struct McapMetadataDecoder;
 
 const ARCHETYPE_NAME: &str = "McapMetadata";
-const ROSBAG2_METADATA_NAME: &str = "rosbag2";
+const MCAP_METADATA_ENTITY_PATH: &str = "__mcap_metadata";
 
 impl Decoder for McapMetadataDecoder {
     fn identifier() -> DecoderIdentifier {
@@ -26,12 +26,10 @@ impl Decoder for McapMetadataDecoder {
 
     fn process(
         &mut self,
-        mcap_bytes: &[u8],
-        summary: &mcap::Summary,
-        _topic_filter: &super::TopicFilter,
-        emit: &mut dyn FnMut(Chunk),
+        ctx: &DecoderContext<'_>,
+        emit: &(dyn Fn(Chunk) + Send + Sync),
     ) -> Result<(), Error> {
-        if summary.metadata_indexes.is_empty() {
+        if ctx.summary().metadata_indexes.is_empty() {
             return Ok(());
         }
 
@@ -39,8 +37,8 @@ impl Decoder for McapMetadataDecoder {
         // Collect all metadata records by name, merging key-value pairs from records with the same name.
         let mut metadata_by_name: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
-        for index in &summary.metadata_indexes {
-            let metadata = match mcap::read::metadata(mcap_bytes, index) {
+        for (index, metadata) in ctx.metadata_records() {
+            let metadata = match metadata {
                 Ok(metadata) => metadata,
                 Err(err) => {
                     re_log::warn_once!(
@@ -50,18 +48,6 @@ impl Decoder for McapMetadataDecoder {
                     continue;
                 }
             };
-
-            if metadata.name == ROSBAG2_METADATA_NAME {
-                // "rosbag2" is a dump of the metadata YAML file that is specific to ROS2's rosbag2 tool.
-                // It's mainly a backwards-compatibility feature for conversion to the legacy SQL rosbag format,
-                // so we can safely ignore it (it is potentially large).
-                // See also: https://docs.ros.org/en/kilted/Releases/Release-Jazzy-Jalisco.html#store-serialized-metadata-in-bag-files-directly
-                re_log::debug_once!(
-                    "Skipping ROS MCAP metadata record '{}' as it is not relevant for Rerun.",
-                    ROSBAG2_METADATA_NAME
-                );
-                continue;
-            }
 
             re_log::debug!(
                 "Processing MCAP metadata record '{}' with {} entries",
@@ -92,13 +78,13 @@ impl Decoder for McapMetadataDecoder {
             let kv = components::KeyValuePairs(pairs);
             batches.push(kv.try_serialized(ComponentDescriptor {
                 archetype: Some(ARCHETYPE_NAME.into()),
-                component: name.into(),
+                component: ComponentIdentifier::try_new(name).map_err(Error::other)?,
                 component_type: Some(components::KeyValuePairs::name()),
             })?);
         }
 
         if !batches.is_empty() {
-            let chunk = Chunk::builder(EntityPath::properties())
+            let chunk = Chunk::builder(EntityPath::from(MCAP_METADATA_ENTITY_PATH))
                 .with_serialized_batches(RowId::new(), TimePoint::STATIC, batches)
                 .build()?;
             emit(chunk);
@@ -118,6 +104,7 @@ mod tests {
     use re_log_types::TimeType;
 
     use crate::DecoderRegistry;
+    use crate::decoders::TestEmitter;
 
     use super::*;
 
@@ -128,16 +115,16 @@ mod tests {
             .expect("failed to read summary")
             .expect("no summary found");
 
-        let mut chunks = Vec::new();
+        let emitter = TestEmitter::default();
+
         let registry = DecoderRegistry::empty().register_file_decoder::<McapMetadataDecoder>();
         registry
             .plan(buffer, &summary, &crate::TopicFilter::default())
             .expect("failed to plan")
-            .run(buffer, &summary, TimeType::TimestampNs, &mut |chunk| {
-                chunks.push(chunk);
-            })
+            .run(buffer, &summary, TimeType::TimestampNs, &*emitter)
             .expect("failed to run decoder");
-        chunks
+
+        emitter.finish()
     }
 
     /// Tests that multiple metadata records are merged into a single chunk with one component per metadata.
@@ -166,7 +153,10 @@ mod tests {
         assert_eq!(chunks.len(), 1, "all metadata in a single chunk");
 
         let chunk = &chunks[0];
-        assert_eq!(chunk.entity_path(), &EntityPath::properties());
+        assert_eq!(
+            chunk.entity_path(),
+            &EntityPath::from(MCAP_METADATA_ENTITY_PATH)
+        );
         assert!(chunk.is_static());
         assert_eq!(chunk.num_components(), 3);
     }

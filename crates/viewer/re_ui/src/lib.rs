@@ -11,10 +11,12 @@ mod design_tokens;
 pub mod drag_and_drop;
 pub mod egui_ext;
 pub mod filter_widget;
+mod fuzzy;
 mod help;
 mod hot_reload_design_tokens;
 mod icon_text;
 pub mod icons;
+mod link_button;
 pub mod list_item;
 pub mod loading_indicator;
 mod markdown_utils;
@@ -29,6 +31,10 @@ pub mod time;
 mod time_drag_value;
 mod ui_ext;
 mod ui_layout;
+mod url_decorator;
+
+#[cfg(target_os = "linux")]
+mod wayland;
 
 mod button;
 mod combo_item;
@@ -41,15 +47,27 @@ use re_log::debug_assert;
 
 pub use self::button::*;
 pub use self::combo_item::*;
-pub use self::command::{UICommand, UICommandSender};
-pub use self::command_palette::{CommandPalette, CommandPaletteAction, CommandPaletteUrl};
+pub use self::command::{
+    CommandEnvironment, RecordingCommand, RecordingCommandKind, RecordingCommandSender,
+    RedapServerCommand, RedapServerCommandKind, RedapServerCommandSender, ResolvedCommand,
+    SetPlaybackSpeed, TableCommand, TableCommandKind, TableCommandSender, UICommand,
+    UICommandSender, consume_timeline_shortcut, listen_for_kb_shortcuts, refresh_shortcuts,
+};
+pub use self::command_palette::{
+    CmdRow, CommandPalette, CommandPaletteProvider, MatchGroup, MatchedCmd, RowState,
+    paint_command_row,
+};
 pub use self::context_ext::ContextExt;
-pub use self::design_tokens::{DesignTokens, TableStyle};
+pub use self::design_tokens::{
+    AlertVisuals, ButtonVisuals, DesignTokens, TableStyle, WindowFrameConfig,
+};
 pub use self::egui_ext::widget_ext::*;
+pub use self::fuzzy::{FuzzyMatch, FuzzyQuery};
 pub use self::help::*;
 pub use self::hot_reload_design_tokens::design_tokens_of;
 pub use self::icon_text::*;
 pub use self::icons::Icon;
+pub use self::link_button::LinkButton;
 pub use self::markdown_utils::*;
 pub use self::notifications::Link;
 pub use self::relative_time_range::{
@@ -60,6 +78,7 @@ pub use self::syntax_highlighting::SyntaxHighlighting;
 pub use self::time_drag_value::TimeDragValue;
 pub use self::ui_ext::UiExt;
 pub use self::ui_layout::UiLayout;
+pub use self::url_decorator::{UrlDecorator, UrlDecoratorFn};
 
 // ---------------------------------------------------------------------------
 
@@ -69,15 +88,48 @@ pub fn fullsize_content(os: egui::os::OperatingSystem) -> bool {
     os == egui::os::OperatingSystem::Mac
 }
 
-/// If true, we hide the native window decoration
-/// (the top bar with app title, close button etc),
-/// and instead paint our own close/maximize/minimize buttons.
-pub const CUSTOM_WINDOW_DECORATIONS: bool = false; // !FULLSIZE_CONTENT; // TODO(emilk): https://github.com/rerun-io/rerun/issues/1063
+/// Whether we support drawing a custom title bar (and overall decorations) on this OS.
+pub fn supports_custom_decorations(os: egui::os::OperatingSystem) -> bool {
+    matches!(
+        os,
+        // On Mac we use the fullsize_content approach, which also is still a custom title bar, but preserves the native title bar buttons.
+        egui::os::OperatingSystem::Windows | egui::os::OperatingSystem::Nix
+    )
+}
 
-/// If true, we show the native window decorations/chrome with the
-/// close/maximize/minimize buttons and app title.
-pub fn native_window_bar(os: egui::os::OperatingSystem) -> bool {
-    !fullsize_content(os) && !CUSTOM_WINDOW_DECORATIONS
+/// Whether custom (client-drawn) window decorations should be the default on this system.
+///
+/// On Linux + Wayland we negotiate with the compositor via
+/// `xdg-decoration-unstable-v1`: we get `false` only if the compositor commits
+/// to drawing server-side decorations. Everywhere else (and on probe failure)
+/// we return `true`. The result is cached for the lifetime of the process.
+pub fn custom_window_decorations_default() -> bool {
+    cfg_select! {
+        target_os = "linux" => {
+            // Skip the probe entirely on non-Wayland sessions.
+            if std::env::var_os("WAYLAND_DISPLAY").is_none()
+                && std::env::var_os("WAYLAND_SOCKET").is_none()
+            {
+                return true;
+            }
+
+            use std::sync::OnceLock;
+            static CACHE: OnceLock<bool> = OnceLock::new();
+            *CACHE.get_or_init(wayland::should_draw_own_decorations)
+        }
+        target_os = "windows" => {
+            // On Windows we always draw decorations ourselves, but egui will still enable drop shadows etc.
+            true
+        }
+        target_os = "macos" => {
+            // On MacOS we use native decorations but draw inside the title bar, so not fully custom.
+            false
+        }
+        _ => {
+            // On unknown platforms we should stick with what they provide.
+            false
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -176,6 +228,14 @@ fn set_themes(egui_ctx: &egui::Context) {
     for theme in [egui::Theme::Dark, egui::Theme::Light] {
         let mut style = std::sync::Arc::unwrap_or_clone(egui_ctx.style_of(theme));
         design_tokens_of(theme).apply(&mut style);
+
+        // Disable `warn_if_rect_changes_id`.
+        // We have widgets with expected ID changes per rect (e.g. scrolling tables).
+        #[cfg(debug_assertions)]
+        {
+            style.debug.warn_if_rect_changes_id = false;
+        }
+
         egui_ctx.set_style_of(theme, style);
     }
 }

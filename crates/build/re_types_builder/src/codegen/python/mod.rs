@@ -613,7 +613,7 @@ impl PythonCodeGenerator {
 
             if ext_class.found {
                 code.push_unindented(
-                    format!("from .{} import {}", ext_class.module_name, ext_class.name,),
+                    format!("from .{} import {}", ext_class.module_name, ext_class.name),
                     1,
                 );
             }
@@ -634,17 +634,18 @@ impl PythonCodeGenerator {
                 );
             }
 
-            let import_clauses: HashSet<_> = obj
-                .fields
-                .iter()
-                .filter_map(|field| quote_import_clauses_from_field(obj.scope().as_ref(), field))
-                .chain(obj.fields.iter().filter_map(|field| {
+            let import_clauses: HashSet<_> = std::iter::chain(
+                obj.fields.iter().filter_map(|field| {
+                    quote_import_clauses_from_field(obj.scope().as_ref(), field)
+                }),
+                obj.fields.iter().filter_map(|field| {
                     let fqname = field.typ.fqname()?;
                     objects[fqname].delegate_datatype(objects).map(|delegate| {
                         quote_import_clauses_from_fqname(obj.scope().as_ref(), &delegate.fqname)
                     })
-                }))
-                .collect();
+                }),
+            )
+            .collect();
             for clause in import_clauses {
                 code.push_indented(0, &clause, 1);
             }
@@ -935,10 +936,10 @@ fn code_for_struct(
         //  and appear at the end of the list, but it currently doesn't. This is unfortunate as
         //  the apparent field order is inconsistent with what the `xxxx_init()` override
         //  accepts.
-        let fields_in_order = fields
-            .iter()
-            .filter(|field| !field.is_nullable)
-            .chain(fields.iter().filter(|field| field.is_nullable));
+        let fields_in_order = std::iter::chain(
+            fields.iter().filter(|field| !field.is_nullable),
+            fields.iter().filter(|field| field.is_nullable),
+        );
         for field in fields_in_order {
             let ObjectField {
                 name, is_nullable, ..
@@ -1896,8 +1897,46 @@ fn quote_field_type_from_field(
         Type::Array {
             elem_type,
             length: _,
+        } => match elem_type {
+            ElementType::Binary | ElementType::String => unimplemented!(
+                "fixed-size arrays of {elem_type:?} are not supported by the Python codegen"
+            ),
+            _ => quote_plural_field_type_from_element_type(elem_type, unwrap, &mut unwrapped),
+        },
+        Type::Vector { elem_type } => match elem_type {
+            ElementType::Binary => "list[bytes]".to_owned(),
+            ElementType::String => "list[str]".to_owned(),
+            _ => quote_plural_field_type_from_element_type(elem_type, unwrap, &mut unwrapped),
+        },
+        Type::Object { fqname } => quote_type_from_element_type(&ElementType::Object {
+            fqname: fqname.clone(),
+        }),
+    };
+
+    (typ, unwrapped)
+}
+
+/// The Python type of an array/vector field over the given element type
+/// (excluding `Binary`/`String` elements, whose spelling differs between the two).
+fn quote_plural_field_type_from_element_type(
+    elem_type: &ElementType,
+    unwrap: bool,
+    unwrapped: &mut bool,
+) -> String {
+    match elem_type {
+        ElementType::Object { .. } => {
+            let typ = quote_type_from_element_type(elem_type);
+            if unwrap {
+                *unwrapped = true;
+                typ
+            } else {
+                format!("list[{typ}]")
+            }
         }
-        | Type::Vector { elem_type } => match elem_type {
+
+        // Scalars and nested fixed-size arrays map to a (multi-dimensional)
+        // numpy array of the innermost element type.
+        _ => match elem_type.innermost_element_type() {
             ElementType::UInt8 => "npt.NDArray[np.uint8]".to_owned(),
             ElementType::UInt16 => "npt.NDArray[np.uint16]".to_owned(),
             ElementType::UInt32 => "npt.NDArray[np.uint32]".to_owned(),
@@ -1910,24 +1949,15 @@ fn quote_field_type_from_field(
             ElementType::Float16 => "npt.NDArray[np.float16]".to_owned(),
             ElementType::Float32 => "npt.NDArray[np.float32]".to_owned(),
             ElementType::Float64 => "npt.NDArray[np.float64]".to_owned(),
-            ElementType::Binary => "list[bytes]".to_owned(),
-            ElementType::String => "list[str]".to_owned(),
-            ElementType::Object { .. } => {
-                let typ = quote_type_from_element_type(elem_type);
-                if unwrap {
-                    unwrapped = true;
-                    typ
-                } else {
-                    format!("list[{typ}]")
-                }
+            innermost
+            @ (ElementType::Binary | ElementType::String | ElementType::Object { .. }) => {
+                unimplemented!(
+                    "nested fixed-size arrays over {innermost:?} are not supported by the Python codegen"
+                )
             }
+            ElementType::Array { .. } => unreachable!("innermost cannot be an array"),
         },
-        Type::Object { fqname } => quote_type_from_element_type(&ElementType::Object {
-            fqname: fqname.clone(),
-        }),
-    };
-
-    (typ, unwrapped)
+    }
 }
 
 /// Returns a default converter function for the given field.
@@ -1987,25 +2017,20 @@ fn quote_field_converter_from_field(
                 "str".to_owned()
             }
         }
-        Type::Array {
-            elem_type,
-            length: _,
+        Type::Array { elem_type, length } => {
+            if let Some(enum_obj) = elem_type.enum_obj(objects) {
+                quote_enum_array_field_converter(obj, field, enum_obj, Some(*length), &mut function)
+            } else {
+                lookup_np_array_conversion_method(elem_type)
+            }
         }
-        | Type::Vector { elem_type } => match elem_type {
-            ElementType::UInt8 => "to_np_uint8".to_owned(),
-            ElementType::UInt16 => "to_np_uint16".to_owned(),
-            ElementType::UInt32 => "to_np_uint32".to_owned(),
-            ElementType::UInt64 => "to_np_uint64".to_owned(),
-            ElementType::Int8 => "to_np_int8".to_owned(),
-            ElementType::Int16 => "to_np_int16".to_owned(),
-            ElementType::Int32 => "to_np_int32".to_owned(),
-            ElementType::Int64 => "to_np_int64".to_owned(),
-            ElementType::Bool => "to_np_bool".to_owned(),
-            ElementType::Float16 => "to_np_float16".to_owned(),
-            ElementType::Float32 => "to_np_float32".to_owned(),
-            ElementType::Float64 => "to_np_float64".to_owned(),
-            _ => String::new(),
-        },
+        Type::Vector { elem_type } => {
+            if let Some(enum_obj) = elem_type.enum_obj(objects) {
+                quote_enum_array_field_converter(obj, field, enum_obj, None, &mut function)
+            } else {
+                lookup_np_array_conversion_method(elem_type)
+            }
+        }
         Type::Object { fqname } => {
             let typ = quote_type_from_element_type(&ElementType::Object {
                 fqname: fqname.clone(),
@@ -2065,6 +2090,95 @@ fn quote_field_converter_from_field(
     };
 
     (converter, function)
+}
+
+// Returns the name of the NumPy array conversion method for the given element type or empty string if not applicable.
+fn lookup_np_array_conversion_method(elem_type: &ElementType) -> String {
+    // Nested fixed-size arrays convert like their innermost element type:
+    // the numpy conversion preserves the multi-dimensional shape.
+    match elem_type.innermost_element_type() {
+        ElementType::UInt8 => "to_np_uint8".to_owned(),
+        ElementType::UInt16 => "to_np_uint16".to_owned(),
+        ElementType::UInt32 => "to_np_uint32".to_owned(),
+        ElementType::UInt64 => "to_np_uint64".to_owned(),
+        ElementType::Int8 => "to_np_int8".to_owned(),
+        ElementType::Int16 => "to_np_int16".to_owned(),
+        ElementType::Int32 => "to_np_int32".to_owned(),
+        ElementType::Int64 => "to_np_int64".to_owned(),
+        ElementType::Bool => "to_np_bool".to_owned(),
+        ElementType::Float16 => "to_np_float16".to_owned(),
+        ElementType::Float32 => "to_np_float32".to_owned(),
+        ElementType::Float64 => "to_np_float64".to_owned(),
+
+        // No numpy conversion for these; the field keeps its native representation.
+        ElementType::Binary | ElementType::String | ElementType::Object { .. } => String::new(),
+
+        ElementType::Array { .. } => unreachable!("innermost cannot be an array"),
+    }
+}
+
+fn quote_enum_array_field_converter(
+    obj: &Object,
+    field: &ObjectField,
+    enum_obj: &Object,
+    length: Option<usize>,
+    function: &mut String,
+) -> String {
+    let converter_name = format!(
+        "_{}__{}__special_field_converter_override",
+        obj.snake_case_name(),
+        field.name
+    );
+    let enum_name = &enum_obj.name;
+    // E.g. `datatypes.EnumTest`. This relies on the module (e.g. `datatypes`) being importable
+    // relative to the generated file, which also works for the test types (where the absolute
+    // `rerun.testing.datatypes` path does not exist).
+    let enum_type = fqname_to_type(&enum_obj.fqname);
+    let enum_module = enum_type.rsplit_once('.').map_or_else(
+        || panic!("Missing '.' separator in type: {enum_type:?}"),
+        |(module, _name)| module.to_owned(),
+    );
+
+    let length_check = length.map_or_else(String::new, |length| {
+        format!(
+            r#"
+                if len(values) != {length}:
+                    raise ValueError(f"{field_name} must be a {length}-element array. Got: {{len(values)}}")
+            "#,
+            field_name = field.name,
+        )
+    });
+
+    let obj_type = fqname_to_type(&obj.fqname);
+
+    function.push_unindented(
+        format!(
+            r#"
+            def {converter_name}(x: Any) -> list[{enum_type}]:
+                from .. import {enum_module}
+
+                if isinstance(x, {obj_type}):
+                    return x.{field_name}
+
+                try:
+                    values = list(x)
+                except TypeError as err:
+                    raise ValueError("{field_name} must be an iterable of {enum_name} values") from err
+                {length_check}
+
+                def convert_value(value: Any) -> {enum_type}:
+                    if isinstance(value, ({enum_type}, str)):
+                        return {enum_type}.auto(value)
+                    return {enum_type}.auto(int(value))
+
+                return [convert_value(value) for value in values]
+            "#,
+            field_name = field.name,
+        ),
+        1,
+    );
+
+    converter_name
 }
 
 fn fqname_to_type(fqname: &str) -> String {
@@ -2318,6 +2432,35 @@ fn quote_arrow_serialization(
                             format!("Expected this to have {ATTR_PYTHON_ALIASES} set"),
                         );
                     }
+                } else if let Type::Array {
+                    elem_type,
+                    length: _,
+                } = &obj.fields[0].typ
+                    && let Some(enum_obj) = elem_type.enum_obj(objects)
+                {
+                    let enum_arrow_datatype =
+                        quote_arrow_datatype(&type_registry.get(&enum_obj.fqname));
+                    return Ok(unindent(&format!(
+                        r##"
+                            from typing import cast
+
+                            if isinstance(data, {name}):
+                                typed_data = [data.{field_name}]
+                            else:
+                                data = cast({name}ArrayLike, data)
+                                try:
+                                    typed_data = [{name}(data).{field_name}]  # type: ignore[arg-type]
+                                except (AttributeError, TypeError, ValueError):
+                                    typed_data = [
+                                        datum.{field_name} if isinstance(datum, {name}) else {name}(datum).{field_name}
+                                        for datum in data  # type: ignore[union-attr]  # ty: ignore[not-iterable]
+                                    ]
+
+                            flat_data = [axis.value for item in typed_data for axis in item]
+                            return pa.FixedSizeListArray.from_arrays(pa.array(flat_data, type={enum_arrow_datatype}), type=data_type)
+                        "##,
+                        field_name = obj.fields[0].name,
+                    )));
                 }
             }
 

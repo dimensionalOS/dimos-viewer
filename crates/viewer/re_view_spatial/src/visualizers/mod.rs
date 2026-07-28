@@ -9,8 +9,8 @@ mod cameras;
 mod capsules3d;
 mod cylinders3d;
 mod depth_images;
+mod ellipses2d;
 mod ellipsoids;
-mod encoded_depth_image;
 mod grid_map;
 mod images;
 mod lines2d;
@@ -22,16 +22,17 @@ mod segmentation_images;
 mod transform_axes_3d;
 pub mod utilities;
 mod video;
+mod voxel_grid_map;
 
 pub use cameras::{CamerasVisualizer, CamerasVisualizerOutput};
 pub use depth_images::{DepthImageProcessResult, DepthImageVisualizer, DepthImageVisualizerOutput};
-pub use encoded_depth_image::{EncodedDepthImageVisualizer, EncodedDepthImageVisualizerOutput};
 use re_sdk_types::{ComponentDescriptor, ComponentIdentifier, archetypes};
-pub use transform_axes_3d::{TransformAxes3DVisualizer, add_axis_arrows};
+pub use transform_axes_3d::{Axes, TransformAxes3DVisualizer, add_axis_arrows};
 pub use utilities::{
-    SpatialViewVisualizerData, UiLabel, UiLabelStyle, UiLabelTarget, entity_iterator,
-    iter_spatial_data, process_labels_3d, textured_rect_from_image,
+    SpatialViewVisualizerData, UiLabel, UiLabelStyle, UiLabelTarget, entity_from_grid_transform,
+    entity_iterator, iter_spatial_data, process_labels_3d, textured_rect_from_image,
 };
+pub use video::{EncodedDepthImageVisualizer, EncodedDepthImageVisualizerOutput};
 
 /// Shows a loading animation in a spatial view.
 ///
@@ -78,7 +79,8 @@ pub fn register_2d_spatial_visualizers(
     system_registry.register_visualizer::<boxes3d::Boxes3DVisualizer>()?;
     system_registry.register_visualizer::<depth_images::DepthImageVisualizer>()?;
     system_registry.register_visualizer::<ellipsoids::Ellipsoids3DVisualizer>()?;
-    system_registry.register_visualizer::<encoded_depth_image::EncodedDepthImageVisualizer>()?;
+    system_registry.register_visualizer::<ellipses2d::Ellipses2DVisualizer>()?;
+    system_registry.register_visualizer::<video::EncodedDepthImageVisualizer>()?;
     system_registry.register_visualizer::<video::EncodedImageVisualizer>()?;
     system_registry.register_visualizer::<grid_map::GridMapVisualizer>()?;
     system_registry.register_visualizer::<images::ImageVisualizer>()?;
@@ -107,7 +109,8 @@ pub fn register_3d_spatial_visualizers(
     system_registry.register_visualizer::<cylinders3d::Cylinders3DVisualizer>()?;
     system_registry.register_visualizer::<depth_images::DepthImageVisualizer>()?;
     system_registry.register_visualizer::<ellipsoids::Ellipsoids3DVisualizer>()?;
-    system_registry.register_visualizer::<encoded_depth_image::EncodedDepthImageVisualizer>()?;
+    system_registry.register_visualizer::<ellipses2d::Ellipses2DVisualizer>()?;
+    system_registry.register_visualizer::<video::EncodedDepthImageVisualizer>()?;
     system_registry.register_visualizer::<video::EncodedImageVisualizer>()?;
     system_registry.register_visualizer::<grid_map::GridMapVisualizer>()?;
     system_registry.register_visualizer::<images::ImageVisualizer>()?;
@@ -118,6 +121,7 @@ pub fn register_3d_spatial_visualizers(
     system_registry.register_visualizer::<points3d::Points3DVisualizer>()?;
     system_registry.register_visualizer::<segmentation_images::SegmentationImageVisualizer>()?;
     system_registry.register_visualizer::<transform_axes_3d::TransformAxes3DVisualizer>()?;
+    system_registry.register_visualizer::<voxel_grid_map::VoxelGridMapVisualizer>()?;
     system_registry.register_visualizer::<video::VideoFrameReferenceVisualizer>()?;
     system_registry.register_visualizer::<video::VideoStreamVisualizer>()?;
     Ok(())
@@ -141,7 +145,11 @@ pub fn visualizers_processing_draw_order()
             archetypes::DepthImage::descriptor_draw_order(),
         ),
         (
-            encoded_depth_image::EncodedDepthImageVisualizer::identifier(),
+            ellipses2d::Ellipses2DVisualizer::identifier(),
+            archetypes::Ellipses2D::descriptor_draw_order(),
+        ),
+        (
+            video::EncodedDepthImageVisualizer::identifier(),
             archetypes::EncodedDepthImage::descriptor_draw_order(),
         ),
         (
@@ -182,7 +190,7 @@ pub fn visualizers_processing_draw_order()
 
 pub fn collect_ui_labels(system_output: &SystemExecutionOutput) -> Vec<UiLabel> {
     iter_spatial_data(system_output)
-        .flat_map(|(_affinity, data)| data.ui_labels.iter().cloned())
+        .flat_map(|data| data.ui_labels.iter().cloned())
         .collect()
 }
 

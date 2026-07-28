@@ -11,8 +11,8 @@ use prost_reflect::{
     OneofDescriptor, ReflectMessage as _, Value,
 };
 use re_chunk::{Chunk, ChunkId};
-use re_sdk_types::ComponentDescriptor;
 use re_sdk_types::reflection::ComponentDescriptorExt as _;
+use re_sdk_types::{ArchetypeName, ComponentDescriptor};
 
 use crate::parsers::{MessageParser, ParserContext};
 use crate::{DecoderIdentifier, Error, MessageDecoder};
@@ -20,6 +20,9 @@ use crate::{DecoderIdentifier, Error, MessageDecoder};
 struct ProtobufMessageParser {
     message_descriptor: MessageDescriptor,
     builder: FixedSizeListBuilder<StructBuilder>,
+
+    /// Cached grouped fields for the top-level message, avoiding re-computation per message.
+    grouped_fields: Vec<GroupedField>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,49 +60,34 @@ impl ProtobufMessageParser {
     fn new(num_rows: usize, message_descriptor: MessageDescriptor) -> Self {
         let struct_builder = struct_builder_from_message(&message_descriptor);
         let builder = FixedSizeListBuilder::with_capacity(struct_builder, 1, num_rows);
+        let grouped_fields = grouped_fields(&message_descriptor);
 
         Self {
             message_descriptor,
             builder,
+            grouped_fields,
         }
     }
 }
 
-/// Helper function to append fields from a protobuf message to a struct builder.
-/// This handles both proto3 optional field semantics and regular proto3 fields:
-/// - For proto3 optional fields (presence tracking): append null for unset fields
-/// - For regular proto3 fields (no presence tracking): append default values for unset fields
+/// Append fields from a protobuf message to a struct builder.
+///
+/// `grouped` must correspond to the message's descriptor. For the top-level message this is
+/// pre-cached on [`ProtobufMessageParser`];
 fn append_message_fields(
     dynamic_message: &DynamicMessage,
     struct_builder: &mut StructBuilder,
+    grouped: &[GroupedField],
 ) -> Result<(), ProtobufError> {
-    // Get the actual field descriptors from the schema to access their real field numbers.
-    // This is critical for schemas with gaps in field numbering (e.g., fields 1, 2, 5, 8).
-    let descriptor = dynamic_message.descriptor();
-
-    // Create a map of field number -> value for fields that were actually set.
-    // In proto3, scalar fields don't have presence tracking unless marked `optional`,
-    // so we use fields() which only returns fields that were explicitly set.
-    let set_fields: ahash::HashMap<u32, &prost_reflect::Value> = dynamic_message
-        .fields()
-        .map(|(field_desc, value)| (field_desc.number(), value))
-        .collect();
-
-    let grouped = grouped_fields(&descriptor);
-
-    for (field_builder, grouped_field) in struct_builder
-        .field_builders_mut()
-        .iter_mut()
-        .zip(grouped.iter())
-    {
+    for (field_builder, grouped_field) in std::iter::zip(
+        struct_builder.field_builders_mut().iter_mut(),
+        grouped.iter(),
+    ) {
         match grouped_field {
             GroupedField::Regular(field_desc) => {
-                // Use the actual field number from the schema, not index-based numbering.
-                // Protobuf schemas can have gaps (e.g., fields 1, 2, 5, 8 after deprecating 3, 4).
-                let protobuf_number = field_desc.number();
-
-                if let Some(val) = set_fields.get(&protobuf_number) {
-                    append_value(field_builder, field_desc, val)?;
+                if dynamic_message.has_field(field_desc) {
+                    let val = dynamic_message.get_field(field_desc);
+                    append_value(field_builder, field_desc, &val)?;
                 } else {
                     // For proto3 optional fields, maps, and lists: append null for unset fields.
                     // For regular proto3 fields: append default values.
@@ -107,7 +95,6 @@ fn append_message_fields(
                     {
                         append_null_to_builder(field_builder)?;
                     } else {
-                        // Use the default value for this field type.
                         let default_value = field_desc.default_value();
                         append_value(field_builder, field_desc, &default_value)?;
                     }
@@ -121,13 +108,13 @@ fn append_message_fields(
 
                 // Find which variant (if any) is set in this message.
                 let mut any_set = false;
-                for (variant_builder, variant_field) in oneof_builder
-                    .field_builders_mut()
-                    .iter_mut()
-                    .zip(oneof.fields())
-                {
-                    if let Some(val) = set_fields.get(&variant_field.number()) {
-                        append_value(variant_builder, &variant_field, val)?;
+                for (variant_builder, variant_field) in std::iter::zip(
+                    oneof_builder.field_builders_mut().iter_mut(),
+                    oneof.fields(),
+                ) {
+                    if dynamic_message.has_field(&variant_field) {
+                        let val = dynamic_message.get_field(&variant_field);
+                        append_value(variant_builder, &variant_field, &val)?;
                         any_set = true;
                     } else {
                         append_null_to_builder(variant_builder)?;
@@ -157,7 +144,7 @@ impl MessageParser for ProtobufMessageParser {
             )?;
 
         let struct_builder = self.builder.values();
-        append_message_fields(&dynamic_message, struct_builder)?;
+        append_message_fields(&dynamic_message, struct_builder, &self.grouped_fields)?;
         self.builder.append(true);
 
         Ok(())
@@ -171,6 +158,7 @@ impl MessageParser for ProtobufMessageParser {
         let Self {
             message_descriptor,
             mut builder,
+            grouped_fields: _,
         } = *self;
 
         let message_chunk = Chunk::from_auto_row_ids(
@@ -178,13 +166,14 @@ impl MessageParser for ProtobufMessageParser {
             entity_path,
             timelines,
             std::iter::once((
-                ComponentDescriptor::partial("message")
-                    .with_builtin_archetype(message_descriptor.full_name()),
+                ComponentDescriptor::partial("message").with_builtin_archetype(
+                    ArchetypeName::try_new(message_descriptor.full_name())?,
+                ),
                 builder.finish().into(),
             ))
             .collect(),
         )
-        .map_err(|err| Error::Other(anyhow::anyhow!(err)))?;
+        .map_err(Error::other)?;
 
         Ok(vec![message_chunk])
     }
@@ -262,13 +251,15 @@ fn append_value(
         Value::U64(x) => downcast_err::<UInt64Builder>(builder, val)?.append_value(*x),
         Value::F32(x) => downcast_err::<Float32Builder>(builder, val)?.append_value(*x),
         Value::F64(x) => downcast_err::<Float64Builder>(builder, val)?.append_value(*x),
-        Value::String(x) => downcast_err::<StringBuilder>(builder, val)?.append_value(x.clone()),
+        Value::String(x) => downcast_err::<StringBuilder>(builder, val)?.append_value(x),
         Value::Bytes(bytes) => {
-            downcast_err::<BinaryBuilder>(builder, val)?.append_value(bytes.clone());
+            downcast_err::<BinaryBuilder>(builder, val)?.append_value(bytes);
         }
         Value::Message(dynamic_message) => {
             let struct_builder = downcast_err::<StructBuilder>(builder, val)?;
-            append_message_fields(dynamic_message, struct_builder)?;
+            // TODO(grtlr): Measure and consider caching the grouped fields for all messages.
+            let nested_grouped = grouped_fields(&dynamic_message.descriptor());
+            append_message_fields(dynamic_message, struct_builder, &nested_grouped)?;
         }
         Value::List(vec) => {
             re_log::trace!("Append called on a list with {} elements: {val}", vec.len(),);
@@ -289,7 +280,6 @@ fn append_value(
                     actual: field.kind(),
                 });
             };
-            let key_field = entry_msg.map_entry_key_field();
             let value_field = entry_msg.map_entry_value_field();
 
             let map_builder = downcast_err::<
@@ -299,8 +289,7 @@ fn append_value(
             let mut sorted_entries: Vec<_> = hash_map.iter().collect();
             sorted_entries.sort_by_key(|(k, _)| (*k).clone());
             for (map_key, map_value) in sorted_entries {
-                let key_value = map_key_to_value(map_key);
-                append_value(map_builder.keys(), &key_field, &key_value)?;
+                append_map_key(map_builder.keys(), map_key);
                 append_value(map_builder.values(), &value_field, map_value)?;
             }
             map_builder
@@ -336,15 +325,25 @@ fn append_value(
     Ok(())
 }
 
-/// Converts a [`MapKey`] to a [`Value`] so it can be appended via `append_value`.
-fn map_key_to_value(key: &MapKey) -> Value {
+/// Appends a [`MapKey`] directly to the appropriate builder.
+fn append_map_key(builder: &mut dyn ArrayBuilder, key: &MapKey) {
+    macro_rules! downcast_append {
+        ($builder:expr, $T:ty, $val:expr) => {
+            $builder
+                .as_any_mut()
+                .downcast_mut::<$T>()
+                .unwrap()
+                .append_value($val)
+        };
+    }
+
     match key {
-        MapKey::Bool(b) => Value::Bool(*b),
-        MapKey::I32(i) => Value::I32(*i),
-        MapKey::I64(i) => Value::I64(*i),
-        MapKey::U32(u) => Value::U32(*u),
-        MapKey::U64(u) => Value::U64(*u),
-        MapKey::String(s) => Value::String(s.clone()),
+        MapKey::Bool(v) => downcast_append!(builder, BooleanBuilder, *v),
+        MapKey::I32(v) => downcast_append!(builder, Int32Builder, *v),
+        MapKey::I64(v) => downcast_append!(builder, Int64Builder, *v),
+        MapKey::U32(v) => downcast_append!(builder, UInt32Builder, *v),
+        MapKey::U64(v) => downcast_append!(builder, UInt64Builder, *v),
+        MapKey::String(v) => downcast_append!(builder, StringBuilder, v),
     }
 }
 
@@ -564,10 +563,9 @@ impl MessageDecoder for McapProtobufDecoder {
 
     fn init(&mut self, summary: &mcap::Summary) -> Result<(), Error> {
         for channel in summary.channels.values() {
-            let schema = channel
-                .schema
-                .as_ref()
-                .ok_or(Error::NoSchema(channel.topic.clone()))?;
+            let Some(schema) = channel.schema.as_ref() else {
+                continue;
+            };
 
             if schema.encoding.as_str() != "protobuf" {
                 continue;
@@ -667,7 +665,7 @@ mod integration_tests {
     use re_log_types::TimeType;
 
     use crate::DecoderRegistry;
-    use crate::decoders::McapProtobufDecoder;
+    use crate::decoders::{McapProtobufDecoder, TestEmitter};
 
     fn format_chunk(chunk: &Chunk) -> String {
         let batch = chunk.to_record_batch().expect("failed to convert chunk");
@@ -944,20 +942,16 @@ mod integration_tests {
     }
 
     fn run_decoder(summary: &mcap::Summary, buffer: &[u8]) -> Vec<Chunk> {
-        let mut chunks = Vec::new();
-
-        let mut send_chunk = |chunk| {
-            chunks.push(chunk);
-        };
+        let emitter = TestEmitter::default();
 
         let registry = DecoderRegistry::empty().register_message_decoder::<McapProtobufDecoder>();
         registry
             .plan(buffer, summary, &crate::TopicFilter::default())
             .expect("failed to plan")
-            .run(buffer, summary, TimeType::TimestampNs, &mut send_chunk)
+            .run(buffer, summary, TimeType::TimestampNs, &*emitter)
             .expect("failed to run decoder");
 
-        chunks
+        emitter.finish()
     }
 
     /// Helper to create test messages with various field combinations.

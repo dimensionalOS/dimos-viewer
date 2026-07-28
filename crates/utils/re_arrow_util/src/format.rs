@@ -134,7 +134,7 @@ impl std::fmt::Display for DisplayMetadata {
                         (false, true) => trim_name(value),
                         (false, false) => value,
                     };
-                    format!("{prefix}{key}: {value}",)
+                    format!("{prefix}{key}: {value}")
                 })
                 .collect_vec()
                 .join("\n"),
@@ -356,7 +356,7 @@ fn format_dataframe_without_metadata(
         table.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
     }
 
-    let formatters = itertools::izip!(fields.iter(), columns.iter())
+    let formatters = itertools::izip!(fields, columns)
         .map(|(field, array)| custom_array_formatter(field, &**array, redact_non_deterministic))
         .collect_vec();
 
@@ -494,11 +494,13 @@ fn format_cell(string: String, max_cell_content_width: usize) -> Cell {
     let chars: Vec<_> = string.chars().collect();
     if chars.len() > max_cell_content_width {
         Cell::new(
-            chars
-                .into_iter()
-                .take(max_cell_content_width.saturating_sub(1))
-                .chain(['…'])
-                .collect::<String>(),
+            std::iter::chain(
+                chars
+                    .into_iter()
+                    .take(max_cell_content_width.saturating_sub(1)),
+                ['…'],
+            )
+            .collect::<String>(),
         )
     } else {
         Cell::new(string)

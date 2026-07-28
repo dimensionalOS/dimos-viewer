@@ -1,6 +1,5 @@
 #![expect(clippy::fn_params_excessive_bools)] // We used named arguments, so this is fine
 #![expect(clippy::needless_pass_by_value)] // A lot of arguments to #[pyfunction] need to be by value
-#![expect(clippy::too_many_arguments)] // We used named arguments, so this is fine
 
 use std::borrow::Borrow as _;
 use std::io::IsTerminal as _;
@@ -10,20 +9,25 @@ use std::time::Duration;
 
 use arrow::array::RecordBatch as ArrowRecordBatch;
 use itertools::Itertools as _;
-use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError};
+use pyo3::exceptions::{
+    PyKeyboardInterrupt, PyRuntimeError, PyStopIteration, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use re_auth::oauth::Credentials;
 use re_auth::oauth::login_flow::{DeviceCodeFlow, DeviceCodeFlowState};
 //use crate::reflection::ComponentDescriptorExt as _;
-use re_chunk::ChunkBatcherConfig;
+use re_chunk::{ChunkBatcherConfig, TimelineName};
 use re_log::ResultExt as _;
 use re_log_types::external::re_types_core::reflection::ComponentDescriptorExt as _;
 use re_log_types::{BlueprintActivationCommand, EntityPathPart, LogMsg, RecordingId};
 use re_sdk::external::re_log_encoding::Encoder;
 use re_sdk::sink::{BinaryStreamStorage, CallbackSink, MemorySinkStorage, SinkFlushError};
 use re_sdk::time::TimePoint;
-use re_sdk::{ComponentDescriptor, EntityPath, RecordingStream, RecordingStreamBuilder, TimeCell};
+use re_sdk::{
+    ArchetypeName, ComponentDescriptor, ComponentIdentifier, ComponentType, EntityPath,
+    RecordingStream, RecordingStreamBuilder, TimeCell,
+};
 #[cfg(feature = "web_viewer")]
 use re_web_viewer_server::WebViewerServerPort;
 
@@ -39,7 +43,7 @@ impl PyRuntimeErrorExt for PyRuntimeError {
     }
 }
 
-use crate::recording::PyRecordingInternal;
+use crate::chunk::PyChunkInternal;
 
 // The bridge needs to have complete control over the lifetimes of the individual recordings,
 // otherwise all the recording shutdown machinery (which includes deallocating C, Rust and Python
@@ -95,7 +99,7 @@ static GARBAGE_QUEUE: LazyLock<(GarbageSender, GarbageReceiver)> = LazyLock::new
 ///
 /// Any time you release the GIL (e.g. `py.allow_threads()`), try to slip in a call to this
 /// function so we don't accumulate too much garbage.
-fn flush_garbage_queue() {
+pub(crate) fn flush_garbage_queue() {
     while GARBAGE_QUEUE.1.try_recv().is_ok() {
         // Implicitly dropping chunks, therefore triggering their `release` callbacks, therefore
         // triggering the native Python GC.
@@ -110,6 +114,30 @@ fn global_web_viewer_server()
     static WEB_HANDLE: OnceLock<parking_lot::Mutex<Option<re_web_viewer_server::WebViewerServer>>> =
         OnceLock::new();
     WEB_HANDLE.get_or_init(Default::default).lock()
+}
+
+/// Static holding the puffin profiler so it stays alive for the lifetime of the SDK.
+///
+/// Wrapped in `Option` so [`shutdown_puffin_profiler`] can take and drop it explicitly,
+/// flushing any pending frames to the connected `puffin_viewer`.
+fn puffin_profiler_slot() -> &'static parking_lot::Mutex<Option<re_tracing::Profiler>> {
+    static PROFILER: OnceLock<parking_lot::Mutex<Option<re_tracing::Profiler>>> = OnceLock::new();
+    PROFILER.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+/// Start a `puffin` profiling server and spawn `puffin_viewer` to connect to it.
+fn init_puffin_profiler() {
+    let mut slot = puffin_profiler_slot().lock();
+    slot.get_or_insert_with(|| {
+        let mut profiler = re_tracing::Profiler::default();
+        profiler.start();
+        profiler
+    });
+}
+
+/// Flush the last profiling scopes to the puffin viewer.
+fn shutdown_puffin_profiler() {
+    puffin_profiler_slot().lock().take();
 }
 
 /// Initialize the performance telemetry stack in a static so it can keep running for the entire
@@ -127,13 +155,24 @@ fn init_perf_telemetry() -> parking_lot::MutexGuard<'static, re_perf_telemetry::
 
             let runtime = crate::utils::get_tokio_runtime(); // telemetry must be init in a Tokio context
             runtime.block_on(async {
-                let telemetry = re_perf_telemetry::Telemetry::init(
+                // Wire a Python `ContextVar` reader as the session-id source for
+                // `re_perf_telemetry::current_rerun_session_id`. The crate itself
+                // doesn't know Python exists; we hand it a closure it can call.
+                let telemetry = re_perf_telemetry::Telemetry::init_with_session_id_reader(
                     args,
                     // NOTE: It's a static in this case, so it's never dropped anyhow.
                     re_perf_telemetry::TelemetryDropBehavior::Shutdown,
+                    || {
+                        pyo3::Python::attach(
+                            crate::tracing_session::current_rerun_session_id_from_contextvar,
+                        )
+                    },
                 )
                 // Perf telemetry is a developer tool, it's not compiled into final user builds.
                 .expect("could not start perf telemetry");
+                // `Telemetry::init` sets `re_perf_telemetry::is_telemetry_active()` on
+                // its own success path; the Python `_is_telemetry_active()` binding
+                // reads from there. Single source of truth.
                 parking_lot::Mutex::new(telemetry)
             })
         })
@@ -164,6 +203,10 @@ fn rerun_bindings(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "perf_telemetry"))]
     let _telemetry = init_perf_telemetry();
+
+    if re_log::env_var_is_truthy("RERUN_PUFFIN") {
+        init_puffin_profiler();
+    }
 
     // These two components are necessary for imports to work
     m.add_class::<PyMemorySinkStorage>()?;
@@ -227,6 +270,7 @@ fn rerun_bindings(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serve_web_viewer, m)?)?;
     m.add_function(wrap_pyfunction!(serve_web, m)?)?;
     m.add_function(wrap_pyfunction!(disconnect, m)?)?;
+    m.add_function(wrap_pyfunction!(finalize_deferred_sinks, m)?)?;
     m.add_function(wrap_pyfunction!(flush, m)?)?;
 
     // time
@@ -235,15 +279,16 @@ fn rerun_bindings(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_time_timestamp_nanos_since_epoch, m)?)?;
     m.add_function(wrap_pyfunction!(disable_timeline, m)?)?;
     m.add_function(wrap_pyfunction!(reset_time, m)?)?;
+    m.add_function(wrap_pyfunction!(set_log_tick_enabled, m)?)?;
+    m.add_function(wrap_pyfunction!(set_log_time_enabled, m)?)?;
 
     // log any
     m.add_function(wrap_pyfunction!(log_arrow_msg, m)?)?;
     m.add_function(wrap_pyfunction!(log_file_from_path, m)?)?;
     m.add_function(wrap_pyfunction!(log_file_from_contents, m)?)?;
     m.add_function(wrap_pyfunction!(send_arrow_chunk, m)?)?;
-    m.add_function(wrap_pyfunction!(send_chunk, m)?)?;
+    m.add_function(wrap_pyfunction!(send_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(send_blueprint, m)?)?;
-    m.add_function(wrap_pyfunction!(send_recording, m)?)?;
 
     // misc
     m.add_function(wrap_pyfunction!(version, m)?)?;
@@ -264,8 +309,12 @@ fn rerun_bindings(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
 
-    // recording
-    crate::recording::register(m)?;
+    // video stream utilities
+    m.add_function(wrap_pyfunction!(crate::video::video_detect_gop_start, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::video::video_length_prefixed_to_annex_b,
+        m
+    )?)?;
 
     // chunk
     crate::chunk::register(m)?;
@@ -276,6 +325,41 @@ fn rerun_bindings(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // tracing bridge: connect Python tracing spans to Rust
     m.add_function(wrap_pyfunction!(
         crate::trace_context::get_trace_context_var,
+        m
+    )?)?;
+
+    // tracing_session(): customer-facing context manager for support correlation.
+    m.add_function(wrap_pyfunction!(
+        crate::tracing_session::get_tracing_session_var,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::tracing_session::is_telemetry_active,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::tracing_session::inc_active_tracing_sessions,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::tracing_session::dec_active_tracing_sessions,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::tracing_session::log_tracing_session_started,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::tracing_session::log_tracing_session_finished,
+        m
+    )?)?;
+
+    // query_metrics(): experimental, customer-facing context manager for
+    // capturing DataFusion query metrics from Python.
+    m.add_class::<crate::query_metrics::PyQueryMetrics>()?;
+    m.add_class::<crate::query_metrics::PyMetricsCollectorHandle>()?;
+    m.add_function(wrap_pyfunction!(
+        crate::query_metrics::new_metrics_collector,
         m
     )?)?;
 
@@ -311,7 +395,7 @@ fn flush_and_cleanup_orphaned_recordings(py: Python<'_>) -> PyResult<()> {
     py.detach(|| -> Result<(), SinkFlushError> {
         // Now flush all recordings to handle weird cases where the data in the queue
         // is actually holding onto the ref to the recording.
-        for recording in all_recordings().iter().chain(orphaned_recordings().iter()) {
+        for recording in std::iter::chain(&*all_recordings(), &*orphaned_recordings()) {
             recording.flush_blocking()?;
         }
 
@@ -387,6 +471,7 @@ impl DurationLike {
 /// Defines the different batching thresholds used within the RecordingStream.
 #[pyclass(
     eq,
+    from_py_object,
     name = "ChunkBatcherConfig",
     module = "rerun_bindings.rerun_bindings"
 )]
@@ -528,8 +613,16 @@ impl PyChunkBatcherConfig {
     #[expect(non_snake_case)]
     #[staticmethod]
     /// Always flushes ASAP.
-    fn ALWAYS() -> Self {
-        Self(ChunkBatcherConfig::ALWAYS)
+    ///
+    /// !!! warning
+    ///     Test-only configuration. Produces an unrealistically large number of chunks and is
+    ///     not suitable for production workloads. With a file sink in particular, per-chunk
+    ///     metadata is accumulated in memory until the SDK process ends and the file footer
+    ///     can be written, which can drive memory usage through the roof. Use
+    ///     [`LOW_LATENCY`][rerun_bindings.ChunkBatcherConfig.LOW_LATENCY] instead for fast
+    ///     flushing in real applications.
+    fn ALWAYS_TEST_ONLY() -> Self {
+        Self(ChunkBatcherConfig::ALWAYS_TEST_ONLY)
     }
 
     #[expect(non_snake_case)]
@@ -691,11 +784,13 @@ fn shutdown(py: Python<'_>) {
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "perf_telemetry"))]
     init_perf_telemetry().shutdown();
+
+    shutdown_puffin_profiler();
 }
 
 // --- Recordings ---
 
-#[pyclass(frozen, module = "rerun_bindings.rerun_bindings")] // NOLINT: ignore[py-cls-eq] non-trivial implementation
+#[pyclass(frozen, from_py_object, module = "rerun_bindings.rerun_bindings")] // NOLINT: ignore[py-cls-eq] non-trivial implementation
 #[derive(Clone)]
 pub(crate) struct PyRecordingStream(RecordingStream);
 
@@ -944,6 +1039,7 @@ fn send_mem_sink_as_default_blueprint(
     executable_path = None,
     extra_args = vec![],
     extra_env = vec![],
+    headless = false,
 ))]
 fn spawn(
     port: u16,
@@ -955,7 +1051,8 @@ fn spawn(
     executable_path: Option<String>,
     extra_args: Vec<String>,
     extra_env: Vec<(String, String)>,
-) -> PyResult<()> {
+    headless: bool,
+) -> PyResult<Option<u32>> {
     let spawn_opts = re_sdk::SpawnOptions {
         port,
         wait_for_bind: true,
@@ -968,10 +1065,11 @@ fn spawn(
         extra_args,
         extra_env,
         new: false,
+        headless,
     };
 
     re_sdk::spawn(&spawn_opts)
-        .map(|_| ())
+        .map(|info| info.child_pid)
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))
 }
 
@@ -1028,19 +1126,23 @@ impl PyGrpcSink {
 #[derive(PartialEq, Hash)]
 struct PyFileSink {
     path: PathBuf,
+    write_footer: bool,
 }
 
 #[pymethods]
 impl PyFileSink {
     #[new]
-    #[pyo3(signature = (path))]
-    #[pyo3(text_signature = "(self, path)")]
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    #[pyo3(signature = (path, *, write_footer = true))]
+    #[pyo3(text_signature = "(self, path, *, write_footer=True)")]
+    fn new(path: PathBuf, write_footer: bool) -> Self {
+        Self { path, write_footer }
     }
 
     pub fn __repr__(&self) -> String {
-        format!("FileSink({:#?})", self.path)
+        format!(
+            "FileSink({:#?}, write_footer={})",
+            self.path, self.write_footer
+        )
     }
 }
 
@@ -1064,24 +1166,29 @@ fn set_sinks<'py>(
 
     let mut resolved_sinks: Vec<Box<dyn re_sdk::sink::LogSink>> = Vec::new();
     for sink in sinks {
-        if let Ok(sink) = sink.downcast::<PyGrpcSink>() {
+        if let Ok(sink) = sink.cast::<PyGrpcSink>() {
             let sink = sink.get();
             let sink = re_sdk::sink::GrpcSink::new(sink.uri.clone());
             resolved_sinks.push(Box::new(sink));
-        } else if let Ok(sink) = sink.downcast::<PyFileSink>() {
+        } else if let Ok(sink) = sink.cast::<PyFileSink>() {
             let sink = sink.get();
-            let sink = re_sdk::sink::FileSink::new(sink.path.clone())
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+            let sink = re_sdk::sink::FileSink::with_options(
+                sink.path.clone(),
+                re_sdk::sink::FileSinkOptions {
+                    write_footer: sink.write_footer,
+                },
+            )
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
             resolved_sinks.push(Box::new(sink));
-        } else if let Ok(storage) = sink.downcast::<PyBinarySinkStorage>() {
+        } else if let Ok(storage) = sink.cast::<PyBinarySinkStorage>() {
             // Direct PyBinarySinkStorage
             let binary_sink =
                 re_sdk::sink::BinaryStreamSink::with_shared_storage(&storage.get().inner);
             resolved_sinks.push(Box::new(binary_sink));
-        } else if let Ok(storage) = sink.getattr("storage").and_then(|attr| {
-            attr.downcast_into::<PyBinarySinkStorage>()
-                .map_err(Into::into)
-        }) {
+        } else if let Ok(storage) = sink
+            .getattr("storage")
+            .and_then(|attr| attr.cast_into::<PyBinarySinkStorage>().map_err(Into::into))
+        {
             // Python BinaryStream wrapper — extract .storage
             let binary_sink =
                 re_sdk::sink::BinaryStreamSink::with_shared_storage(&storage.get().inner);
@@ -1191,11 +1298,12 @@ fn connect_grpc_blueprint(
 
 /// Save the recording stream to a file.
 #[pyfunction]
-#[pyo3(signature = (path, default_blueprint = None, recording = None))]
+#[pyo3(signature = (path, default_blueprint = None, recording = None, *, write_footer = true))]
 fn save(
     path: &str,
     default_blueprint: Option<&PyMemorySinkStorage>,
     recording: Option<&PyRecordingStream>,
+    write_footer: bool,
     py: Python<'_>,
 ) -> PyResult<()> {
     let Some(recording) = get_data_recording(recording) else {
@@ -1212,8 +1320,11 @@ fn save(
     py.detach(|| {
         // We create the sink manually so we can send the default blueprint
         // first before the rest of the current recording stream.
-        let sink = re_sdk::sink::FileSink::new(path)
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        let sink = re_sdk::sink::FileSink::with_options(
+            path,
+            re_sdk::sink::FileSinkOptions { write_footer },
+        )
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
         if let Some(default_blueprint) = default_blueprint {
             send_mem_sink_as_default_blueprint(&sink, default_blueprint);
@@ -1263,10 +1374,11 @@ fn save_blueprint(
 
 /// Save to stdout.
 #[pyfunction]
-#[pyo3(signature = (default_blueprint = None, recording = None))]
+#[pyo3(signature = (default_blueprint = None, recording = None, *, write_footer = true))]
 fn stdout(
     default_blueprint: Option<&PyMemorySinkStorage>,
     recording: Option<&PyRecordingStream>,
+    write_footer: bool,
     py: Python<'_>,
 ) -> PyResult<()> {
     let Some(recording) = get_data_recording(recording) else {
@@ -1286,8 +1398,10 @@ fn stdout(
             Box::new(re_sdk::sink::BufferedSink::new())
         } else {
             Box::new(
-                re_sdk::sink::FileSink::stdout()
-                    .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
+                re_sdk::sink::FileSink::stdout_with_options(re_sdk::sink::FileSinkOptions {
+                    write_footer,
+                })
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
             )
         };
 
@@ -1751,6 +1865,27 @@ fn disconnect(py: Python<'_>, recording: Option<&PyRecordingStream>) {
     });
 }
 
+/// Finalize any deferred-finalization sinks (i.e. file-like sinks that write a footer at the end).
+///
+/// For a bare `FileSink` this is equivalent to `disconnect()`. For a `MultiSink` containing both
+/// streaming and file-like children, only the file-like children are dropped — the streaming
+/// children stay live. For all other sinks this is a no-op.
+///
+/// Used by `RecordingStream.__exit__` so that file-backed recordings are consumable as soon as
+/// the `with`-block exits, without waiting for `__del__` / GC.
+#[pyfunction]
+#[pyo3(signature = (recording=None))]
+fn finalize_deferred_sinks(py: Python<'_>, recording: Option<&PyRecordingStream>) {
+    let Some(recording) = get_data_recording(recording) else {
+        return;
+    };
+    // Release the GIL in case any flushing behavior needs to cleanup a python object.
+    py.detach(|| {
+        recording.finalize_deferred_sinks();
+        flush_garbage_queue();
+    });
+}
+
 /// Block until outstanding data has been flushed to the sink.
 #[pyfunction]
 #[pyo3(signature = (*, timeout_sec = 1e38, recording = None))] // Can't use infinity here because of python_check_signatures.py
@@ -1784,6 +1919,7 @@ fn flush(py: Python<'_>, timeout_sec: f32, recording: Option<&PyRecordingStream>
 /// fields provide additional information about the semantics of the data.
 #[pyclass(
     eq,
+    from_py_object,
     name = "ComponentDescriptor",
     module = "rerun_bindings.rerun_bindings"
 )]
@@ -1796,14 +1932,19 @@ impl PyComponentDescriptor {
     #[new]
     #[pyo3(signature = (component, archetype=None, component_type=None))]
     #[pyo3(text_signature = "(self, component, archetype=None, component_type=None)")]
-    fn new(component: &str, archetype: Option<&str>, component_type: Option<&str>) -> Self {
+    fn new(
+        component: &str,
+        archetype: Option<&str>,
+        component_type: Option<&str>,
+    ) -> PyResult<Self> {
         let descr = ComponentDescriptor {
-            archetype: archetype.map(Into::into),
-            component: component.into(),
-            component_type: component_type.map(Into::into),
+            archetype: archetype.and_then(|s| ArchetypeName::try_new(s).ok()),
+            component: ComponentIdentifier::try_new(component)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
+            component_type: component_type.and_then(|s| ComponentType::try_new(s).ok()),
         };
 
-        Self(descr)
+        Ok(Self(descr))
     }
 
     fn __hash__(&self) -> u64 {
@@ -1851,11 +1992,11 @@ impl PyComponentDescriptor {
     #[pyo3(signature = (archetype=None, component_type=None))]
     fn with_overrides(&mut self, archetype: Option<&str>, component_type: Option<&str>) -> Self {
         let mut cloned = self.0.clone();
-        if let Some(archetype) = archetype {
-            cloned = cloned.with_archetype(archetype.into());
+        if let Some(archetype) = archetype.and_then(|s| ArchetypeName::try_new(s).ok()) {
+            cloned = cloned.with_archetype(archetype);
         }
-        if let Some(component_type) = component_type {
-            cloned = cloned.with_component_type(component_type.into());
+        if let Some(component_type) = component_type.and_then(|s| ComponentType::try_new(s).ok()) {
+            cloned = cloned.with_component_type(component_type);
         }
         Self(cloned)
     }
@@ -1864,18 +2005,22 @@ impl PyComponentDescriptor {
     #[pyo3(signature = (archetype=None, component_type=None))]
     fn or_with_overrides(&mut self, archetype: Option<&str>, component_type: Option<&str>) -> Self {
         let mut cloned = self.0.clone();
-        if let Some(archetype) = archetype {
-            cloned = cloned.or_with_archetype(|| archetype.into());
+        if let Some(archetype) = archetype.and_then(|s| ArchetypeName::try_new(s).ok()) {
+            cloned = cloned.or_with_archetype(|| archetype);
         }
-        if let Some(component_type) = component_type {
-            cloned = cloned.or_with_component_type(|| component_type.into());
+        if let Some(component_type) = component_type.and_then(|s| ComponentType::try_new(s).ok()) {
+            cloned = cloned.or_with_component_type(|| component_type);
         }
         Self(cloned)
     }
 
     /// Sets `archetype` in a format similar to built-in archetypes.
     fn with_builtin_archetype(&mut self, archetype: &str) -> Self {
-        Self(self.0.clone().with_builtin_archetype(archetype))
+        if let Ok(archetype) = ArchetypeName::try_new(archetype) {
+            Self(self.0.clone().with_builtin_archetype(archetype))
+        } else {
+            Self(self.0.clone())
+        }
     }
 }
 
@@ -1884,21 +2029,35 @@ impl PyComponentDescriptor {
 /// Set the current time for this thread as an integer sequence.
 #[pyfunction]
 #[pyo3(signature = (timeline, sequence, recording=None))]
-fn set_time_sequence(timeline: &str, sequence: i64, recording: Option<&PyRecordingStream>) {
+fn set_time_sequence(
+    timeline: &str,
+    sequence: i64,
+    recording: Option<&PyRecordingStream>,
+) -> PyResult<()> {
+    let timeline =
+        TimelineName::try_new(timeline).map_err(|err| PyValueError::new_err(err.to_string()))?;
     let Some(recording) = get_data_recording(recording) else {
-        return;
+        return Ok(());
     };
     recording.set_time(timeline, TimeCell::from_sequence(sequence));
+    Ok(())
 }
 
 /// Set the current duration for this thread in nanoseconds.
 #[pyfunction]
 #[pyo3(signature = (timeline, nanos, recording=None))]
-fn set_time_duration_nanos(timeline: &str, nanos: i64, recording: Option<&PyRecordingStream>) {
+fn set_time_duration_nanos(
+    timeline: &str,
+    nanos: i64,
+    recording: Option<&PyRecordingStream>,
+) -> PyResult<()> {
+    let timeline =
+        TimelineName::try_new(timeline).map_err(|err| PyValueError::new_err(err.to_string()))?;
     let Some(recording) = get_data_recording(recording) else {
-        return;
+        return Ok(());
     };
     recording.set_time(timeline, TimeCell::from_duration_nanos(nanos));
+    Ok(())
 }
 
 /// Set the current time for this thread in nanoseconds.
@@ -1908,21 +2067,27 @@ fn set_time_timestamp_nanos_since_epoch(
     timeline: &str,
     nanos: i64,
     recording: Option<&PyRecordingStream>,
-) {
+) -> PyResult<()> {
+    let timeline =
+        TimelineName::try_new(timeline).map_err(|err| PyValueError::new_err(err.to_string()))?;
     let Some(recording) = get_data_recording(recording) else {
-        return;
+        return Ok(());
     };
     recording.set_time(timeline, TimeCell::from_timestamp_nanos_since_epoch(nanos));
+    Ok(())
 }
 
 /// Clear time information for the specified timeline on this thread.
 #[pyfunction]
 #[pyo3(signature = (timeline, recording=None))]
-fn disable_timeline(timeline: &str, recording: Option<&PyRecordingStream>) {
+fn disable_timeline(timeline: &str, recording: Option<&PyRecordingStream>) -> PyResult<()> {
+    let timeline =
+        TimelineName::try_new(timeline).map_err(|err| PyValueError::new_err(err.to_string()))?;
     let Some(recording) = get_data_recording(recording) else {
-        return;
+        return Ok(());
     };
     recording.disable_timeline(timeline);
+    Ok(())
 }
 
 /// Clear all timeline information on this thread.
@@ -1933,6 +2098,26 @@ fn reset_time(recording: Option<&PyRecordingStream>) {
         return;
     };
     recording.reset_time();
+}
+
+/// Enable or disable automatic injection of the `log_tick` timeline (disabled by default).
+#[pyfunction]
+#[pyo3(signature = (enabled, recording=None))]
+fn set_log_tick_enabled(enabled: bool, recording: Option<&PyRecordingStream>) {
+    let Some(recording) = get_data_recording(recording) else {
+        return;
+    };
+    recording.set_log_tick_enabled(enabled);
+}
+
+/// Enable or disable automatic injection of the `log_time` timeline (enabled by default).
+#[pyfunction]
+#[pyo3(signature = (enabled, recording=None))]
+fn set_log_time_enabled(enabled: bool, recording: Option<&PyRecordingStream>) {
+    let Some(recording) = get_data_recording(recording) else {
+        return;
+    };
+    recording.set_log_time_enabled(enabled);
 }
 
 // --- Log special ---
@@ -2023,25 +2208,56 @@ fn send_arrow_chunk(
     })
 }
 
-/// Send a pre-built chunk to the recording stream.
+/// Send chunks to the recording stream.
+///
+/// Accepts a single chunk or any iterable of chunks. Blocks until every chunk
+/// has been pushed to the recording's batcher.
 #[pyfunction]
-#[pyo3(signature = (chunk, recording=None))]
-fn send_chunk(
+#[pyo3(signature = (chunks, recording=None))]
+fn send_chunks(
     py: Python<'_>,
-    chunk: &crate::chunk::PyChunkInternal,
+    chunks: Bound<'_, PyAny>,
     recording: Option<&PyRecordingStream>,
 ) -> PyResult<()> {
     let Some(recording) = get_data_recording(recording) else {
         return Ok(());
     };
 
-    let chunk = re_chunk::Chunk::clone(chunk.inner());
+    // Single Chunk — fast path
+    if let Ok(chunk_obj) = chunks.cast::<PyChunkInternal>() {
+        let chunk = re_chunk::Chunk::clone(chunk_obj.borrow().inner());
+        py.detach(|| {
+            recording.send_chunk(chunk);
+            flush_garbage_queue();
+        });
+        return Ok(());
+    }
 
-    py.detach(|| {
-        recording.send_chunk(chunk);
+    // Iterable of Chunk. Streamed one at a time — we don't collect into a Vec
+    // because the iterable may be a generator yielding many chunks and buffering
+    // all of them would inflate peak memory.
+    let iter: Py<PyAny> = chunks
+        .try_iter()
+        .map_err(|_err| PyTypeError::new_err("send_chunks expected a Chunk or iterable of Chunk"))?
+        .into_any()
+        .unbind();
 
+    py.detach(|| -> PyResult<()> {
+        loop {
+            let next_chunk = Python::attach(|py| -> PyResult<Option<re_chunk::Chunk>> {
+                match iter.bind(py).call_method0("__next__") {
+                    Ok(obj) => {
+                        let internal: PyRef<'_, PyChunkInternal> = obj.extract()?;
+                        Ok(Some(re_chunk::Chunk::clone(internal.inner())))
+                    }
+                    Err(err) if err.is_instance_of::<PyStopIteration>(py) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            })?;
+            let Some(chunk) = next_chunk else { break };
+            recording.send_chunk(chunk);
+        }
         flush_garbage_queue();
-
         Ok(())
     })
 }
@@ -2146,23 +2362,6 @@ fn send_blueprint(
         recording.send_blueprint(blueprint.inner.take(), activation_cmd);
     } else {
         re_log::warn!("Provided `blueprint` has no store info, cannot send it.");
-    }
-}
-
-/// Send all chunks from a [`PyRecording`] to the given recording stream.
-///
-/// !!! Warning
-///     ⚠️ This API is experimental and may change or be removed in future versions! ⚠️
-#[pyfunction]
-#[pyo3(signature = (rrd, recording = None))]
-fn send_recording(rrd: &PyRecordingInternal, recording: Option<&PyRecordingStream>) {
-    let Some(recording) = get_data_recording(recording) else {
-        return;
-    };
-
-    let store = rrd.store.read();
-    for chunk in store.iter_physical_chunks() {
-        recording.send_chunk((**chunk).clone());
     }
 }
 
@@ -2370,7 +2569,7 @@ authkey = multiprocessing.current_process().authkey
     })
     .and_then(|authkey| {
         authkey
-            .downcast()
+            .cast()
             .cloned()
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))
     })

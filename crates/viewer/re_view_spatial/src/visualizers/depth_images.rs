@@ -21,11 +21,13 @@ use super::entity_iterator::process_archetype;
 use super::{SpatialViewVisualizerData, textured_rect_from_image};
 use crate::contexts::{SpatialSceneVisualizerInstructionContext, TransformTreeContext};
 use crate::visualizers::first_copied;
-use crate::{PickableRectSourceData, PickableTexturedRect, SpatialView3D};
+use crate::{PickableRectSourceData, PickableTexturedRect, SpaceKind, SpatialView3D};
 use re_sdk_types::reflection::Enum as _;
 
 pub struct DepthImageProcessResult {
-    pub image_info: ImageInfo,
+    /// Raw image data for pixel-level picking.
+    /// `None` for video-decoded depth images where raw pixel data isn't available.
+    pub image_info: Option<ImageInfo>,
     pub depth_meter: DepthMeter,
     pub colormap: ColormappedTexture,
 }
@@ -46,7 +48,6 @@ pub struct DepthImageComponentData {
     pub magnification_filter: MagnificationFilter,
 }
 
-#[expect(clippy::too_many_arguments)]
 pub fn process_depth_image_data(
     ctx: &QueryContext<'_>,
     ent_context: &SpatialSceneVisualizerInstructionContext<'_>,
@@ -81,9 +82,9 @@ pub fn process_depth_image_data(
         .map(|r| [r[0] as f32, r[1] as f32])
         .unwrap_or_else(|| {
             // Don't use fallback provider since it has to query information we already have.
-            let image_stats = ctx
-                .store_ctx()
-                .memoizer(|c: &mut ImageStatsCache| c.entry(&image_info));
+            let store_ctx = ctx.store_ctx();
+            let image_stats =
+                store_ctx.memoizer_read_or_compute::<ImageStatsCache, _, _>(&image_info);
             ColormapWithRange::default_range_for_depth_images(&image_stats)
         });
     let colormap_with_range = ColormapWithRange {
@@ -134,7 +135,7 @@ pub fn process_depth_image_data(
                 fill_ratio,
                 &textured_rect.colormapped_texture,
             );
-            data_store.add_bounding_box(
+            data_store.add_bounding_box_3d(
                 entity_path.hash(),
                 cloud.world_space_bbox(),
                 glam::Affine3A::IDENTITY,
@@ -142,7 +143,7 @@ pub fn process_depth_image_data(
             depth_cloud_entities.insert(
                 entity_path.hash(),
                 DepthImageProcessResult {
-                    image_info,
+                    image_info: Some(image_info),
                     depth_meter,
                     colormap: textured_rect.colormapped_texture,
                 },
@@ -164,7 +165,7 @@ pub fn process_depth_image_data(
                     depth_meter: Some(depth_meter),
                 },
             },
-            ent_context.view_class_identifier,
+            SpaceKind::TwoD,
         );
     }
 }
@@ -187,6 +188,8 @@ fn process_entity_view_as_depth_cloud(
 
     let dimensions = glam::UVec2::from_array(depth_texture.texture.width_height());
 
+    // Depth meter defines how many texture units we need for a single world unit.
+    // Therefore, the scaling factor for texture depth -> world depth is the inverse of that:
     let world_depth_from_texture_depth = 1.0 / *depth_meter.0;
 
     // We want point radius to be defined in a scale where the radius of a point
@@ -221,7 +224,10 @@ fn process_entity_view_as_depth_cloud(
 
 impl IdentifiedViewSystem for DepthImageVisualizer {
     fn identifier() -> re_viewer_context::ViewSystemIdentifier {
-        "DepthImage".into()
+        re_viewer_context::external::re_string_interner::intern_static!(
+            re_viewer_context::ViewSystemIdentifier,
+            "DepthImage"
+        )
     }
 }
 

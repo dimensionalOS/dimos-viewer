@@ -9,6 +9,7 @@
 //! To go from a freshly decoded transport-level type to its application-level equivalent, use [`ToApplication`].
 //! To prepare an application-level type for encoding, use [`ToTransport`].
 
+use itertools::Itertools as _;
 use re_build_info::CrateVersion;
 use re_log_types::{BlueprintActivationCommand, SetStoreInfo};
 
@@ -56,15 +57,13 @@ impl ToTransport for crate::RrdFooter {
     type Context<'a> = ();
 
     fn to_transport(&self, (): Self::Context<'_>) -> Result<Self::Output, CodecError> {
-        let manifests: Result<Vec<_>, _> = self
+        let manifests: Vec<_> = self
             .manifests
             .values()
             .map(|manifest| manifest.to_transport(()))
-            .collect();
+            .try_collect()?;
 
-        Ok(Self::Output {
-            manifests: manifests?,
-        })
+        Ok(Self::Output { manifests })
     }
 }
 
@@ -228,7 +227,7 @@ impl ToApplication for re_protos::log_msg::v1alpha1::RrdManifest {
 /// `SetStoreInfo` message.
 ///
 /// The provided [`ApplicationIdInjector`] must be shared across all calls for the same stream.
-#[tracing::instrument(level = "trace", skip_all)]
+#[tracing::instrument(level = "debug", skip_all)]
 fn log_msg_transport_to_app<I: ApplicationIdInjector + ?Sized>(
     app_id_injector: &mut I,
     message: &re_protos::log_msg::v1alpha1::log_msg::Msg,
@@ -305,7 +304,7 @@ fn log_msg_transport_to_app<I: ApplicationIdInjector + ?Sized>(
 }
 
 /// Converts a transport-level `ArrowMsg` to its application-level counterpart.
-#[tracing::instrument(level = "trace", skip_all)]
+#[tracing::instrument(level = "debug", skip_all)]
 fn arrow_msg_transport_to_app(
     arrow_msg: &re_protos::log_msg::v1alpha1::ArrowMsg,
 ) -> Result<re_log_types::ArrowMsg, CodecError> {

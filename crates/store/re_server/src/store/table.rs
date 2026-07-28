@@ -12,12 +12,14 @@ use futures::StreamExt as _;
 use re_log_types::EntryId;
 use re_protos::EntryName;
 use re_protos::cloud::v1alpha1::EntryKind;
-use re_protos::cloud::v1alpha1::ext::{EntryDetails, ProviderDetails, TableEntry};
+use re_protos::cloud::v1alpha1::ext::{
+    EntryDetails, ProviderDetails, TableDetails, TableEntry, TableInsertMode,
+};
 
 #[derive(Clone)]
 pub enum TableType {
     DataFusionTable(Arc<dyn TableProvider>),
-    #[cfg(feature = "lance")]
+    #[cfg(all(feature = "lance", not(target_arch = "wasm32")))]
     LanceDataset(Arc<lance::Dataset>),
 }
 
@@ -31,6 +33,7 @@ pub struct Table {
     updated_at: jiff::Timestamp,
 
     provider_details: ProviderDetails,
+    table_details: TableDetails,
 }
 
 impl Table {
@@ -40,6 +43,7 @@ impl Table {
         table: TableType,
         created_at: Option<jiff::Timestamp>,
         provider_details: ProviderDetails,
+        table_details: TableDetails,
     ) -> Self {
         Self {
             id,
@@ -48,6 +52,7 @@ impl Table {
             created_at: created_at.unwrap_or_else(jiff::Timestamp::now),
             updated_at: jiff::Timestamp::now(),
             provider_details,
+            table_details,
         }
     }
 
@@ -89,13 +94,23 @@ impl Table {
             },
 
             provider_details: self.provider_details.clone(),
+            table_details: self.table_details.clone(),
         }
+    }
+
+    pub fn table_details(&self) -> &TableDetails {
+        &self.table_details
+    }
+
+    pub fn set_table_details(&mut self, table_details: TableDetails) {
+        self.table_details = table_details;
+        self.updated_at = jiff::Timestamp::now();
     }
 
     pub fn schema(&self) -> SchemaRef {
         match &self.table {
             TableType::DataFusionTable(t) => t.schema(),
-            #[cfg(feature = "lance")]
+            #[cfg(all(feature = "lance", not(target_arch = "wasm32")))]
             TableType::LanceDataset(dataset) => {
                 Arc::new(arrow::datatypes::Schema::from(dataset.schema()))
             }
@@ -105,7 +120,7 @@ impl Table {
     pub fn provider(&self) -> Arc<dyn TableProvider> {
         match &self.table {
             TableType::DataFusionTable(t) => Arc::clone(t),
-            #[cfg(feature = "lance")]
+            #[cfg(all(feature = "lance", not(target_arch = "wasm32")))]
             TableType::LanceDataset(dataset) => {
                 Arc::new(lance::datafusion::LanceTableProvider::new(
                     Arc::new(dataset.as_ref().clone()),
@@ -119,18 +134,32 @@ impl Table {
     async fn write_table_provider(
         &self,
         rb: RecordBatch,
-        insert_op: InsertOp,
+        insert_op: TableInsertMode,
     ) -> Result<(), DataFusionError> {
         let schema = rb.schema();
 
-        #[cfg_attr(not(feature = "lance"), expect(irrefutable_let_patterns))]
+        #[cfg_attr(
+            not(all(feature = "lance", not(target_arch = "wasm32"))),
+            expect(irrefutable_let_patterns)
+        )]
         let TableType::DataFusionTable(provider) = &self.table else {
             return exec_err!("Expected DataFusion Table Provider");
         };
 
+        let df_op = match insert_op {
+            TableInsertMode::Append => InsertOp::Append,
+            TableInsertMode::Overwrite => InsertOp::Overwrite,
+            TableInsertMode::Replace => InsertOp::Replace,
+            TableInsertMode::Update => {
+                return exec_err!(
+                    "TableInsertMode::Update is not supported for DataFusion table providers"
+                );
+            }
+        };
+
         let input = MemorySourceConfig::try_new_from_batches(schema, vec![rb])?;
         let session = SessionStateBuilder::default().build();
-        let result = provider.insert_into(&session, input, insert_op).await?;
+        let result = provider.insert_into(&session, input, df_op).await?;
         let mut output = result.execute(0, session.task_ctx())?;
 
         while let Some(r) = output.next().await {
@@ -139,11 +168,11 @@ impl Table {
         Ok(())
     }
 
-    #[cfg(feature = "lance")]
+    #[cfg(all(feature = "lance", not(target_arch = "wasm32")))]
     async fn write_table_lance_dataset(
         &mut self,
         rb: RecordBatch,
-        insert_op: InsertOp,
+        insert_op: TableInsertMode,
     ) -> Result<(), DataFusionError> {
         use lance::dataset::{
             MergeInsertBuilder, WhenMatched, WhenNotMatched, WriteMode, WriteParams,
@@ -157,8 +186,32 @@ impl Table {
 
         let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(rb)], schema);
 
+        let merge_with = |when_not_matched: WhenNotMatched| {
+            let key_columns: Vec<_> = dataset
+                .schema()
+                .fields
+                .iter()
+                .filter_map(|field| {
+                    if field
+                        .metadata
+                        .get(re_sorbet::metadata::SORBET_IS_TABLE_INDEX)
+                        .is_some_and(|v| v.to_lowercase() == "true")
+                    {
+                        Some(field.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let mut builder = MergeInsertBuilder::try_new(Arc::clone(dataset), key_columns)?;
+            builder
+                .when_not_matched(when_not_matched)
+                .when_matched(WhenMatched::UpdateAll)
+                .try_build()
+        };
+
         match insert_op {
-            InsertOp::Append => {
+            TableInsertMode::Append => {
                 params.mode = WriteMode::Append;
 
                 dataset
@@ -168,36 +221,20 @@ impl Table {
                     .await
                     .map_err(|err| DataFusionError::External(err.into()))?;
             }
-            InsertOp::Replace => {
-                let key_columns: Vec<_> = dataset
-                    .schema()
-                    .fields
-                    .iter()
-                    .filter_map(|field| {
-                        if field
-                            .metadata
-                            .get(re_sorbet::metadata::SORBET_IS_TABLE_INDEX)
-                            .is_some_and(|v| v.to_lowercase() == "true")
-                        {
-                            Some(field.name.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                let mut builder = MergeInsertBuilder::try_new(Arc::clone(dataset), key_columns)?;
-
-                let op = builder
-                    .when_not_matched(WhenNotMatched::InsertAll)
-                    .when_matched(WhenMatched::UpdateAll)
-                    .try_build()?;
-
+            TableInsertMode::Replace => {
+                let op = merge_with(WhenNotMatched::InsertAll)?;
                 let (merge_dataset, _merge_stats) = op.execute_reader(reader).await?;
-
                 *dataset = merge_dataset;
             }
-            InsertOp::Overwrite => {
+            TableInsertMode::Update => {
+                // Partial-schema upsert: update existing rows only, drop unmatched.
+                // Lance 7 rejects `WhenNotMatched::InsertAll` when the source
+                // omits any non-nullable target column.
+                let op = merge_with(WhenNotMatched::DoNothing)?;
+                let (merge_dataset, _merge_stats) = op.execute_reader(reader).await?;
+                *dataset = merge_dataset;
+            }
+            TableInsertMode::Overwrite => {
                 params.mode = WriteMode::Overwrite;
 
                 let _ =
@@ -217,25 +254,29 @@ impl Table {
         Ok(())
     }
 
-    #[cfg_attr(not(feature = "lance"), expect(clippy::needless_pass_by_ref_mut))]
+    #[cfg_attr(
+        not(all(feature = "lance", not(target_arch = "wasm32"))),
+        expect(clippy::needless_pass_by_ref_mut)
+    )]
     pub async fn write_table(
         &mut self,
         rb: RecordBatch,
-        insert_op: InsertOp,
+        insert_op: TableInsertMode,
     ) -> Result<(), DataFusionError> {
         match &self.table {
-            #[cfg(feature = "lance")]
+            #[cfg(all(feature = "lance", not(target_arch = "wasm32")))]
             TableType::LanceDataset(_) => self.write_table_lance_dataset(rb, insert_op).await,
             TableType::DataFusionTable(_) => self.write_table_provider(rb, insert_op).await,
         }
     }
 
-    #[cfg(feature = "lance")]
+    #[cfg(all(feature = "lance", not(target_arch = "wasm32")))]
     pub async fn create_table_entry(
         id: EntryId,
         name: EntryName,
         url: &url::Url,
         schema: SchemaRef,
+        table_details: TableDetails,
     ) -> Result<Self, super::error::Error> {
         use re_protos::cloud::v1alpha1::ext::LanceTable;
 
@@ -260,16 +301,18 @@ impl Table {
             TableType::LanceDataset(ds),
             created_at,
             ProviderDetails::LanceTable(provider_details),
+            table_details,
         ))
     }
 
-    #[cfg(not(feature = "lance"))]
+    #[cfg(not(all(feature = "lance", not(target_arch = "wasm32"))))]
     #[expect(clippy::unused_async)]
     pub async fn create_table_entry(
         _id: EntryId,
         _name: EntryName,
         _url: &url::Url,
         _schema: SchemaRef,
+        _table_details: TableDetails,
     ) -> Result<Self, super::error::Error> {
         Err(DataFusionError::NotImplemented(
             "Create table not implemented for bare DataFusion table".to_owned(),

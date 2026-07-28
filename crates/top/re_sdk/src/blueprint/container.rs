@@ -365,6 +365,36 @@ impl From<crate::blueprint::TextDocumentView> for ContainerLike {
     }
 }
 
+impl From<crate::blueprint::TextLogView> for ContainerLike {
+    fn from(view: crate::blueprint::TextLogView) -> Self {
+        Self::View(view.0)
+    }
+}
+
+impl From<crate::blueprint::BarChartView> for ContainerLike {
+    fn from(view: crate::blueprint::BarChartView) -> Self {
+        Self::View(view.0)
+    }
+}
+
+impl From<crate::blueprint::DataframeView> for ContainerLike {
+    fn from(view: crate::blueprint::DataframeView) -> Self {
+        Self::View(view.0)
+    }
+}
+
+impl From<crate::blueprint::StateTimelineView> for ContainerLike {
+    fn from(view: crate::blueprint::StateTimelineView) -> Self {
+        Self::View(view.0)
+    }
+}
+
+impl From<crate::blueprint::TensorView> for ContainerLike {
+    fn from(view: crate::blueprint::TensorView) -> Self {
+        Self::View(view.0)
+    }
+}
+
 impl From<crate::blueprint::Spatial2DView> for ContainerLike {
     fn from(view: crate::blueprint::Spatial2DView) -> Self {
         Self::View(view.0)
@@ -373,6 +403,12 @@ impl From<crate::blueprint::Spatial2DView> for ContainerLike {
 
 impl From<crate::blueprint::Spatial3DView> for ContainerLike {
     fn from(view: crate::blueprint::Spatial3DView) -> Self {
+        Self::View(view.0)
+    }
+}
+
+impl From<crate::blueprint::GraphView> for ContainerLike {
+    fn from(view: crate::blueprint::GraphView) -> Self {
         Self::View(view.0)
     }
 }

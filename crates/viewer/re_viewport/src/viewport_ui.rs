@@ -24,9 +24,19 @@ use re_viewport_blueprint::{
 
 use crate::system_execution::{execute_systems_for_all_views, execute_systems_for_view};
 
-/// Toggle the currently selected view to be maximized or not.
+/// Shortcut for maximizing a view.
+///
+/// Use [`is_toggle_maximize_view_pressed`] to check for this shortcut!
 // NOTE: we use CTRL and not COMMAND, because ⌘+M minimizes the whole window on macOS.
 const TOGGLE_MAXIMIZE_VIEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::M);
+
+/// Checks if the keyboard shortcut for maximizing a view is pressed,
+/// avoiding clashes with other similar shortcuts.
+fn is_toggle_maximize_view_pressed(input: &mut egui::InputState) -> bool {
+    // Check if CTRL+SHIFT+M is pressed instead, which is used to open the dev panel.
+    // `consume_shortcut` intentionally ignores extra Shift and Alt modifiers.
+    !input.modifiers.shift && input.consume_shortcut(&TOGGLE_MAXIMIZE_VIEW)
+}
 
 /// Defines the UI and layout of the Viewport.
 pub struct ViewportUi {
@@ -123,13 +133,7 @@ impl ViewportUi {
             tree.ui(&mut egui_tiles_delegate, ui);
 
             let dragged_payload = egui::DragAndDrop::payload::<DragAndDropPayload>(ui.ctx());
-            let dragged_payload = dragged_payload.as_ref().and_then(|payload| {
-                if let DragAndDropPayload::Entities { entities } = payload.as_ref() {
-                    Some(entities)
-                } else {
-                    None
-                }
-            });
+            let released = ui.input(|i| i.pointer.any_released());
 
             let mut hover_rects = Vec::new();
             let mut selection_rects = Vec::new();
@@ -157,9 +161,30 @@ impl ViewportUi {
                     let should_display_drop_destination_frame = if pointer_in_rect
                         && let Some(view_id) = contents.as_view_id()
                         && let Some(view_blueprint) = self.blueprint.view(&view_id)
-                        && let Some(dragged_payload) = dragged_payload
+                        && let Some(payload) = dragged_payload.as_ref()
                     {
-                        Self::handle_drop_entities_to_view(ctx, view_blueprint, dragged_payload)
+                        let feedback = match payload.as_ref() {
+                            DragAndDropPayload::Entities { entities } => {
+                                Self::handle_drop_entities_to_view(
+                                    ctx,
+                                    view_blueprint,
+                                    entities,
+                                    released,
+                                )
+                            }
+                            DragAndDropPayload::Components { component_paths } => view_blueprint
+                                .class(ctx.view_class_registry())
+                                .handle_component_drop(ctx, view_id, component_paths, released),
+                            DragAndDropPayload::Contents { .. } | DragAndDropPayload::Invalid => {
+                                DragAndDropFeedback::Ignore
+                            }
+                        };
+
+                        if feedback != DragAndDropFeedback::Ignore {
+                            ctx.drag_and_drop_manager().set_feedback(feedback);
+                        }
+
+                        feedback == DragAndDropFeedback::Accept
                     } else {
                         false
                     };
@@ -250,8 +275,6 @@ impl ViewportUi {
 
     /// Handle the entities being dragged over a view.
     ///
-    /// Returns whether a "drop zone candidate" frame should be displayed to the user.
-    ///
     /// Design decisions:
     /// - We accept the drop only if at least one of the entities is visualizable and not already
     ///   included.
@@ -261,7 +284,8 @@ impl ViewportUi {
         ctx: &ViewerContext<'_>,
         view_blueprint: &ViewBlueprint,
         entities: &[EntityPath],
-    ) -> bool {
+        released: bool,
+    ) -> DragAndDropFeedback {
         let recording_engine = ctx.recording_engine();
         let add_info = create_entity_add_info(
             ctx,
@@ -279,19 +303,12 @@ impl ViewportUi {
 
         let any_is_visualizable = entities.iter().any(can_entity_be_added);
 
-        ctx.drag_and_drop_manager()
-            .set_feedback(if any_is_visualizable {
-                DragAndDropFeedback::Accept
-            } else {
-                DragAndDropFeedback::Reject
-            });
-
         if !any_is_visualizable {
-            return false;
+            return DragAndDropFeedback::Reject(None);
         }
 
         // drop incoming!
-        if ctx.egui_ctx().input(|i| i.pointer.any_released()) {
+        if released {
             egui::DragAndDrop::clear_payload(ctx.egui_ctx());
 
             view_blueprint
@@ -309,12 +326,9 @@ impl ViewportUi {
 
             ctx.command_sender()
                 .send_system(SystemCommand::set_selection(Item::View(view_blueprint.id)));
-
-            // drop is completed, no need for highlighting anymore
-            false
-        } else {
-            any_is_visualizable
         }
+
+        DragAndDropFeedback::Accept
     }
 
     pub fn on_frame_start(&self, ctx: &ViewerContext<'_>) {
@@ -434,26 +448,13 @@ impl<'a> egui_tiles::Behavior<ViewId> for TilesDelegate<'a, '_> {
             });
         });
 
-        {
-            let show_loading_indicator = missing_chunk_reporter.any_missing()
-                && self.ctx.recording().can_fetch_chunks_from_redap();
-
-            let loading_indicator_opacity = ui
-                .ctx()
-                .animate_bool(ui.id().with("loading_indicator"), show_loading_indicator);
-
-            if 0.0 < loading_indicator_opacity {
-                let view_rect = response.response.rect;
-                re_ui::loading_indicator::paint_loading_indicator_inside(
-                    ui,
-                    egui::Align2::RIGHT_TOP,
-                    view_rect,
-                    loading_indicator_opacity,
-                    None,
-                    "Fetching chunks from redap",
-                );
-            }
-        }
+        crate::paint_view_loading_indicator(
+            ui,
+            *view_id,
+            response.response.rect,
+            missing_chunk_reporter.any_missing(),
+            self.ctx.recording(),
+        );
 
         response.response.widget_info(|| {
             let mut info = egui::WidgetInfo::new(egui::WidgetType::Panel);
@@ -490,10 +491,14 @@ impl<'a> egui_tiles::Behavior<ViewId> for TilesDelegate<'a, '_> {
             .on_hover_cursor(egui::CursorIcon::Grab);
 
         let label = tab_widget.label.take();
+        let active = tab_state.active;
         response.widget_info(|| {
-            let mut info = egui::WidgetInfo::new(egui::WidgetType::Label);
-            info.label = label.clone();
-            info
+            egui::WidgetInfo::selected(
+                egui::WidgetType::SelectableLabel,
+                true,
+                active,
+                label.clone().unwrap_or_default(),
+            )
         });
 
         // Show a gap when dragged
@@ -596,7 +601,7 @@ impl<'a> egui_tiles::Behavior<ViewId> for TilesDelegate<'a, '_> {
                         .ui(ui);
                 })
                 .clicked()
-                || ui.input_mut(|input| input.consume_shortcut(&TOGGLE_MAXIMIZE_VIEW))
+                || ui.input_mut(is_toggle_maximize_view_pressed)
             {
                 *self.maximized = None;
                 MaximizeAnimationState::restore_view(ui.ctx(), view_id);
@@ -605,8 +610,7 @@ impl<'a> egui_tiles::Behavior<ViewId> for TilesDelegate<'a, '_> {
             // Show maximize-button:
             let is_view_the_only_selected =
                 self.ctx.selection().is_view_the_only_selected(&view_id);
-            let toggle = is_view_the_only_selected
-                && ui.input_mut(|input| input.consume_shortcut(&TOGGLE_MAXIMIZE_VIEW));
+            let toggle = is_view_the_only_selected && ui.input_mut(is_toggle_maximize_view_pressed);
             if ui
                 .small_icon_button(&re_ui::icons::MAXIMIZE, "Maximize view")
                 .on_hover_ui(|ui| {
@@ -766,10 +770,15 @@ impl TilesDelegate<'_, '_> {
                                 visualizer: Some(*instruction_id),
                             });
                             for instruction_report in report.reports_for(instruction_id) {
-                                grouped_reports
-                                    .entry(item.clone())
-                                    .or_default()
-                                    .push(instruction_report.clone());
+                                // Only show a button for errors and warnings.
+                                if instruction_report.severity
+                                    != re_viewer_context::VisualizerReportSeverity::Info
+                                {
+                                    grouped_reports
+                                        .entry(item.clone())
+                                        .or_default()
+                                        .push(instruction_report.clone());
+                                }
                             }
                         }
                     }
@@ -871,6 +880,7 @@ impl TilesDelegate<'_, '_> {
                             re_viewer_context::VisualizerReportSeverity::Warning => {
                                 (&icons::WARNING, ui.tokens().alert_warning.icon)
                             }
+                            re_viewer_context::VisualizerReportSeverity::Info => continue,
                         };
 
                         ui.horizontal_top(|ui| {

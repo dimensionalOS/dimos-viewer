@@ -84,6 +84,9 @@ enum ExternalError {
 
     #[error(transparent)]
     TokenError(#[from] re_auth::TokenError),
+
+    #[error(transparent)]
+    InvalidLayerNameError(#[from] re_types_core::InvalidLayerNameError),
 }
 
 const _: () = assert!(
@@ -189,9 +192,9 @@ impl From<ExternalError> for PyErr {
                 ApiErrorKind::NotFound => NotFoundError::new_err(err.to_string()),
                 ApiErrorKind::AlreadyExists => AlreadyExistsError::new_err(err.to_string()),
                 ApiErrorKind::Timeout => PyTimeoutError::new_err(err.to_string()),
-                ApiErrorKind::Unimplemented | ApiErrorKind::Internal => {
-                    PyRuntimeError::new_err(err.to_string())
-                }
+                ApiErrorKind::Unimplemented
+                | ApiErrorKind::Internal
+                | ApiErrorKind::FailedPrecondition => PyRuntimeError::new_err(err.to_string()),
             },
 
             ExternalError::ArrowError(err) => PyValueError::new_err(format!("Arrow error: {err}")),
@@ -219,6 +222,8 @@ impl From<ExternalError> for PyErr {
             ExternalError::TokenError(err) => {
                 PyPermissionError::new_err(format!("Invalid token: {err}"))
             }
+
+            ExternalError::InvalidLayerNameError(err) => PyValueError::new_err(err.to_string()),
         }
     }
 }

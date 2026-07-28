@@ -26,24 +26,19 @@ _BatchesType: TypeAlias = (
 )
 
 if TYPE_CHECKING:
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     import datafusion
 
-    from rerun.recording import Recording
+    from rerun.experimental import LazyStore
 
     from . import (
         CatalogClient,
-        ComponentColumnDescriptor,
-        ComponentColumnSelector,
         EntryKind,
-        IndexColumnSelector,
-        IndexConfig,
-        IndexingResult,
         IndexValuesLike,
         RegistrationHandle,
         Schema,
-        VectorDistanceMetric,
+        UnregistrationHandle,
     )
 
 
@@ -192,11 +187,17 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
 
         return self._internal.arrow_schema()
 
-    def register_blueprint(self, uri: str, set_default: bool = True) -> None:
+    def register_blueprint(self, uri: str, set_default: bool = True, *, segment_table: bool = False) -> None:
         """
         Register an existing .rbl visible to the server.
 
         By default, also set this blueprint as default.
+
+        Set `segment_table=True` (and `set_default=True`) to register it as this dataset's
+        default for the segment table blueprint.
+
+        The associated blueprint dataset is owned by this dataset for lifecycle purposes.
+        Deleting this dataset also deletes the associated blueprint dataset and its storage.
         """
 
         blueprint_dataset = self.blueprint_dataset()
@@ -204,10 +205,15 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
         if blueprint_dataset is None:
             raise LookupError("a blueprint dataset is not configured for this dataset")
 
-        segment_id = blueprint_dataset.register(uri, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait().segment_ids[0]
+        segment_id = (
+            blueprint_dataset.register([uri], on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait().segment_ids[0]
+        )
 
         if set_default:
-            self.set_default_blueprint(segment_id)
+            if segment_table:
+                self.set_default_segment_table_blueprint(segment_id)
+            else:
+                self.set_default_blueprint(segment_id)
 
     def blueprints(self) -> list[str]:
         """Lists all blueprints currently registered with this dataset."""
@@ -228,10 +234,105 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
 
         return self._internal.default_blueprint_segment_id()
 
+    def set_default_segment_table_blueprint(self, blueprint_name: str | None) -> None:
+        """Set an already-registered blueprint as the default segment table blueprint for this dataset."""
+
+        return self._internal.set_default_segment_table_blueprint_segment_id(blueprint_name)
+
+    def default_segment_table_blueprint(self) -> str | None:
+        """Return the name of the currently set segment table blueprint."""
+
+        return self._internal.default_segment_table_blueprint_segment_id()
+
     def blueprint_dataset(self) -> DatasetEntry | None:
-        """The associated blueprint dataset, if any."""
+        """
+        The associated blueprint dataset, if any.
+
+        The associated blueprint dataset is owned by this dataset for lifecycle purposes.
+        Deleting this dataset also deletes the associated blueprint dataset and its storage.
+        """
 
         ds = self._internal.blueprint_dataset()
+        return None if ds is None else DatasetEntry(ds)
+
+    def assets(self) -> list[str]:
+        """Lists all assets currently registered with this dataset."""
+
+        asset_dataset = self.asset_dataset()
+        if asset_dataset is None:
+            return []
+        else:
+            return asset_dataset.segment_ids()
+
+    def register_asset(self, uri: str) -> str:
+        """
+        Register an existing .rrd visible to the server as an asset.
+
+        Asset datasets hold a small set of static blobs shared across a dataset's segments,
+        so they are kept deliberately small. The server enforces a few limits on the .rrd you register:
+
+        * it must contain only static data, temporal chunks are rejected,
+        * each asset segment must stay under a per-segment size limit,
+        * the asset dataset may only hold a limited number of segments.
+
+        Parameters
+        ----------
+        uri:
+            The URI of the .rrd file to register. It must be visible to the server.
+
+        Returns
+        -------
+        str
+            The segment id of the registered asset.
+
+        """
+
+        asset_dataset = self.asset_dataset()
+
+        if asset_dataset is None:
+            # Datasets created before asset datasets were introduced don't have one until their
+            # entry is next updated, so ask the server to create it.
+            self._internal._ensure_asset_dataset()
+            asset_dataset = self.asset_dataset()
+
+        if asset_dataset is None:
+            raise LookupError("an asset dataset is not configured for this dataset")
+
+        return asset_dataset.register([uri], on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait().segment_ids[0]
+
+    def unregister_asset(self, segment_id: str) -> None:
+        """
+        Unregister a previously registered asset.
+
+        Since assets are shared across all of a dataset's segments, there is no way to scope
+        an asset to a subset of them, so removing one means unregistering it here.
+
+        Unregistering an asset that doesn't exist is a no-op.
+
+        Parameters
+        ----------
+        segment_id:
+            The segment id of the asset to unregister, as returned by [`register_asset`][rerun.catalog.DatasetEntry.register_asset].
+
+        """
+
+        asset_dataset = self.asset_dataset()
+
+        if asset_dataset is None:
+            # No asset dataset means no assets were ever registered, so there is nothing to drop.
+            return
+
+        asset_dataset.unregister(segments_to_drop=[segment_id], layers_to_drop=[])
+
+    def asset_dataset(self) -> DatasetEntry | None:
+        """
+        The associated asset dataset, if any.
+
+        The associated asset dataset is owned by this dataset for lifecycle purposes.
+        Deleting this dataset also deletes the associated asset dataset and its storage.
+        """
+
+        ds = self._internal.asset_dataset()
         return None if ds is None else DatasetEntry(ds)
 
     def schema(self) -> Schema:
@@ -296,6 +397,10 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
 
         return segment_table_df
 
+    @deprecated(
+        "DatasetEntry.manifest() is deprecated and will be removed in a future release. "
+        "It was intended for internal and debugging use only."
+    )
     def manifest(self, include_diagnostic_data: bool = False) -> datafusion.DataFrame:
         """
         Return the dataset manifest as a DataFusion DataFrame.
@@ -312,6 +417,11 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
 
         """
 
+        return self._manifest(include_diagnostic_data=include_diagnostic_data)
+
+    def _manifest(self, include_diagnostic_data: bool = False) -> datafusion.DataFrame:
+        """Return the dataset manifest as a DataFusion DataFrame. Intended for internal and debugging use only."""
+
         from datafusion import col
 
         df = self._internal.manifest()
@@ -325,8 +435,8 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
         self,
         segment_id: str,
         timeline: str | None = None,
-        start: datetime | int | None = None,
-        end: datetime | int | None = None,
+        start: datetime | timedelta | int | None = None,
+        end: datetime | timedelta | int | None = None,
     ) -> str:
         """
         Return the URL for the given segment.
@@ -339,13 +449,14 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
         timeline: str | None
             The name of the timeline to display.
 
-        start: int | datetime | None
+        start: int | datetime | timedelta | None
             The start selected time for the segment.
-            Integer for ticks, or datetime/nanoseconds for timestamps.
+            Integer for ticks, datetime/nanoseconds for timestamps, or timedelta for durations.
 
-        end: int | datetime | None
+        end: int | datetime | timedelta | None
             The end selected time for the segment.
-            Integer for ticks, or datetime/nanoseconds for timestamps.
+            Integer for ticks, datetime/nanoseconds for timestamps, or timedelta for durations.
+            If omitted, no time range selection is emitted (only the `#when` cursor).
 
         Examples
         --------
@@ -366,9 +477,11 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
 
         return self._internal.segment_url(segment_id, timeline, start, end)
 
+    @with_tracing("DatasetEntry.register")
     def register(
         self,
-        recording_uri: str | Sequence[str],
+        # NOTE: this can't be Sequence[str], because `str` IS a `Sequence[str]`, and we would thus get no helpful typechecking
+        recording_uri: list[str],
         *,
         layer_name: str | Sequence[str] = "base",
         on_duplicate: OnDuplicateSegmentLayer = OnDuplicateSegmentLayer.ERROR,
@@ -379,10 +492,13 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
         This method initiates the registration of recordings to the dataset, and returns
         a handle that can be used to wait for completion or iterate over results.
 
+        Prefer batching many URIs into a single `register` call rather than calling
+        `register` repeatedly in a loop, which is much slower.
+
         Parameters
         ----------
         recording_uri:
-            The URI(s) of the RRD(s) to register. Can be a single URI string or a sequence of URIs.
+            The URIs of the RRDs to register, as a sequence of strings.
 
         layer_name:
             The layer(s) to which the recordings will be registered to.
@@ -400,9 +516,18 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
             A handle to track and wait on the registration tasks.
 
         """
+        from rerun.error_utils import _send_warning_or_raise
+
         from ._registration_handle import RegistrationHandle
 
         if isinstance(recording_uri, str):
+            _send_warning_or_raise(
+                "`DatasetEntry.register` was called with a single string for `recording_uri`. "
+                "This is deprecated: pass a sequence of URIs instead, and prefer batching "
+                "many URIs into a single call rather than calling `register` in a loop.",
+                depth_to_user_code=2,
+                warning_type=DeprecationWarning,
+            )
             recording_uris = [recording_uri]
         else:
             recording_uris = list(recording_uri)
@@ -418,13 +543,14 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
             self._internal.register(recording_uris, recording_layers=layer_names, on_duplicate=on_duplicate)
         )
 
+    @with_tracing("DatasetEntry.unregister")
     def unregister(
         self,
         *,
         segments_to_drop: str | Sequence[str],
         layers_to_drop: str | Sequence[str],
         force: bool = False,
-    ) -> None:
+    ) -> UnregistrationHandle:
         """
         Unregisters segments and layers from the dataset.
 
@@ -464,7 +590,11 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
         else:
             layers_to_drop = list(layers_to_drop)
 
-        self._internal.unregister(segments_to_drop=segments_to_drop, layers_to_drop=layers_to_drop, force=force)
+        from ._unregistration_handle import UnregistrationHandle
+
+        return UnregistrationHandle(
+            self._internal.unregister(segments_to_drop=segments_to_drop, layers_to_drop=layers_to_drop, force=force)
+        )
 
     def register_prefix(
         self,
@@ -506,11 +636,18 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
 
         return RegistrationHandle(self._internal.register_prefix(recordings_prefix, layer_name, on_duplicate))
 
-    def download_segment(self, segment_id: str) -> Recording:
-        """Download a segment from the dataset."""
-        from rerun.recording import Recording
+    def segment_store(self, segment_id: str) -> LazyStore:
+        """
+        Open a remote segment as a [`LazyStore`][rerun.experimental.LazyStore].
 
-        return Recording(self._internal.download_segment(segment_id))
+        The manifest is fetched immediately; chunk data is loaded on demand
+        via [`LazyStore.stream`][rerun.experimental.LazyStore.stream]. To fully
+        materialize into a [`ChunkStore`][rerun.experimental.ChunkStore], call
+        `lazy.stream().collect()`.
+        """
+        from rerun.experimental import LazyStore
+
+        return LazyStore(self._internal.segment_store(segment_id))
 
     @with_tracing("DatasetEntry.filter_segments")
     def filter_segments(self, segment_ids: str | Sequence[str] | datafusion.DataFrame) -> DatasetView:
@@ -651,9 +788,45 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
         fill_latest_at
             Whether to fill null values with the latest valid data.
         using_index_values
-            If provided, specifies the exact index values to sample per segment.
-            Can be a numpy array (datetime64[ns] or int64), a pyarrow Array, or a sequence.
-            Use with `fill_latest_at=True` to populate rows with the most recent data.
+            Index values at which to **resample** data.
+
+            When specified, this argument changes the way rows are returned. Instead
+            of returning the rows that exist in the data, one row is returned per
+            `(segment, index_value)` pair you provide. If the segment has no row at
+            that index value, nulls are returned — or the latest prior value if
+            `fill_latest_at=True` (which is typically what you want for resampling).
+
+            Don't use this argument for plain index slicing — use a DataFusion filter
+            on the index column instead. For example:
+
+            ```python
+            from datafusion import col, lit
+
+            # All rows in a time window.
+            ds.reader(index="real_time").filter(
+                (col("real_time") >= lit(t0)) & (col("real_time") <= lit(t1))
+            )
+            ```
+
+            This argument accepts the following shapes:
+            - **plain array**: values are applied only to segments whose index
+              range covers them (segments outside the range are excluded).
+            - **dict**: keys are segment IDs, values are per-segment index values
+              to sample at.
+            - **DataFrame**: must have `rerun_segment_id` and index columns;
+              treated as a per-segment value list.
+
+            !!! note
+                The plain array form requires a scan of the segment table to
+                map values to the segments whose index range covers them. On
+                datasets with many segments this can be expensive. Prefer the
+                dict or DataFrame form when the per-segment values are already
+                known on the client side.
+
+            !!! note
+                Unknown segment IDs are silently ignored — they contribute no
+                rows to the result. Validate client-side if you need to catch
+                unknown segment IDs.
 
         Returns
         -------
@@ -669,135 +842,6 @@ class DatasetEntry(Entry[DatasetEntryInternal]):
             fill_latest_at=fill_latest_at,
             using_index_values=using_index_values,
         )
-
-    @deprecated(
-        "Index creation is currently not supported. Contact Rerun if this is a feature you would like us to support."
-    )
-    def create_fts_search_index(
-        self,
-        *,
-        column: str | ComponentColumnSelector | ComponentColumnDescriptor,
-        time_index: IndexColumnSelector,
-        store_position: bool = False,
-        base_tokenizer: str = "simple",
-    ) -> None:
-        """Create a full-text search index on the given column."""
-
-        try:
-            return self._internal.create_fts_search_index(  # ty: ignore[deprecated]
-                column=column,
-                time_index=time_index,
-                store_position=store_position,
-                base_tokenizer=base_tokenizer,
-            )
-        except Exception as err:
-            raise NotImplementedError(
-                "Index creation is currently not supported. Contact Rerun if this is a feature you would like us to support."
-            ) from err
-
-    @deprecated(
-        "Index creation is currently not supported. Contact Rerun if this is a feature you would like us to support."
-    )
-    def create_vector_search_index(
-        self,
-        *,
-        column: str | ComponentColumnSelector | ComponentColumnDescriptor,
-        time_index: IndexColumnSelector,
-        target_partition_num_rows: int | None = None,
-        num_sub_vectors: int = 16,
-        distance_metric: VectorDistanceMetric | str = "Cosine",
-    ) -> IndexingResult:
-        """
-        Create a vector index on the given column.
-
-        This will enable indexing and build the vector index over all existing values
-        in the specified component column.
-
-        Results can be retrieved using the `search_vector` API, which will include
-        the time-point on the indexed timeline.
-
-        Only one index can be created per component column -- executing this a second
-        time for the same component column will replace the existing index.
-
-        Parameters
-        ----------
-        column
-            The component column to create the index on.
-        time_index
-            Which timeline this index will map to.
-        target_partition_num_rows
-            The target size (in number of rows) for each partition.
-            The underlying indexer (lance) will pick a default when no value
-            is specified - today this is 8192. It will also cap the
-            maximum number of partitions independently of this setting - currently
-            4096.
-        num_sub_vectors
-            The number of sub-vectors to use when building the index.
-        distance_metric
-            The distance metric to use for the index. ("L2", "Cosine", "Dot", "Hamming")
-
-        """
-
-        try:
-            return self._internal.create_vector_search_index(  # ty: ignore[deprecated]
-                column=column,
-                time_index=time_index,
-                target_partition_num_rows=target_partition_num_rows,
-                num_sub_vectors=num_sub_vectors,
-                distance_metric=distance_metric,
-            )
-        except Exception as err:
-            raise NotImplementedError(
-                "Index creation is currently not supported. Contact Rerun if this is a feature you would like us to support."
-            ) from err
-
-    def list_search_indexes(self) -> list[IndexingResult]:
-        """List all user-defined indexes in this dataset."""
-
-        return self._internal.list_search_indexes()
-
-    def delete_search_indexes(
-        self,
-        column: str | ComponentColumnSelector | ComponentColumnDescriptor,
-    ) -> list[IndexConfig]:
-        """Deletes all user-defined indexes for the specified column."""
-
-        return self._internal.delete_search_indexes(column)
-
-    @deprecated(
-        "Index search is currently not supported. Contact Rerun if this is a feature you would like us to support."
-    )
-    def search_fts(
-        self,
-        query: str,
-        column: str | ComponentColumnSelector | ComponentColumnDescriptor,
-    ) -> datafusion.DataFrame:
-        """Search the dataset using a full-text search query."""
-
-        try:
-            return self._internal.search_fts(query, column)  # ty: ignore[deprecated]
-        except Exception as err:
-            raise NotImplementedError(
-                "Index search is currently not supported. Contact Rerun if this is a feature you would like us to support."
-            ) from err
-
-    @deprecated(
-        "Index search is currently not supported. Contact Rerun if this is a feature you would like us to support."
-    )
-    def search_vector(
-        self,
-        query: Any,  # VectorLike
-        column: str | ComponentColumnSelector | ComponentColumnDescriptor,
-        top_k: int,
-    ) -> datafusion.DataFrame:
-        """Search the dataset using a vector search query."""
-
-        try:
-            return self._internal.search_vector(query, column, top_k)  # ty: ignore[deprecated]
-        except Exception as err:
-            raise NotImplementedError(
-                "Index search is currently not supported. Contact Rerun if this is a feature you would like us to support."
-            ) from err
 
     def do_maintenance(  # noqa: PLR0917
         self,
@@ -987,13 +1031,45 @@ class DatasetView:
         include_tombstone_columns
             Whether to include tombstone columns.
         using_index_values
-            Index values at which to sample data.
-            If a plain array is provided, values are applied only to segments
-            whose index range covers them (segments outside the range are excluded).
-            If a dict is provided, keys are segment IDs and values are the index values
-            to sample for that segment (per-segment semantics).
-            If a DataFrame is provided, it must have 'rerun_segment_id' and index columns.
-            Use with `fill_latest_at=True` to populate rows with the most recent data.
+            Index values at which to **resample** data.
+
+            When specified, this argument changes the way rows are returned. Instead
+            of returning the rows that exist in the data, one row is returned per
+            `(segment, index_value)` pair you provide. If the segment has no row at
+            that index value, nulls are returned — or the latest prior value if
+            `fill_latest_at=True` (which is typically what you want for resampling).
+
+            Don't use this argument for plain index slicing — use a DataFusion filter
+            on the index column instead. For example:
+
+            ```python
+            from datafusion import col, lit
+
+            # All rows in a time window.
+            ds.reader(index="real_time").filter(
+                (col("real_time") >= lit(t0)) & (col("real_time") <= lit(t1))
+            )
+            ```
+
+            This argument accepts the following shapes:
+            - **plain array**: values are applied only to segments whose index
+              range covers them (segments outside the range are excluded).
+            - **dict**: keys are segment IDs, values are per-segment index values
+              to sample at.
+            - **DataFrame**: must have `rerun_segment_id` and index columns;
+              treated as a per-segment value list.
+
+            !!! note
+                The plain array form requires a scan of the segment table to
+                map values to the segments whose index range covers them. On
+                datasets with many segments this can be expensive. Prefer the
+                dict or DataFrame form when the per-segment values are already
+                known on the client side.
+
+            !!! note
+                Unknown segment IDs are silently ignored — they contribute no
+                rows to the result. Validate client-side if you need to catch
+                unknown segment IDs.
         fill_latest_at
             Whether to fill null values with the latest valid data.
 
@@ -1002,11 +1078,7 @@ class DatasetView:
         A DataFusion DataFrame.
 
         """
-        import logging
-
         import datafusion as dfn
-
-        available_segments = set() if using_index_values is None else set(self._internal.segment_ids())
 
         index_values_dict = None
         match using_index_values:
@@ -1027,17 +1099,7 @@ class DatasetView:
                 index_values_dict = self._dataframe_to_index_values_dict(df, index)
 
         if index_values_dict is not None:
-            requested_segments = set(index_values_dict.keys())
-            missing_segments = requested_segments - available_segments
-
-            if missing_segments:
-                logging.warning(
-                    f"Index values for the following inexistent or filtered segments "
-                    f"were ignored: {', '.join(sorted(missing_segments))}"
-                )
-
-            valid_segments = requested_segments - missing_segments
-            view = self._internal.filter_segments([*valid_segments])
+            view = self._internal.filter_segments(list(index_values_dict.keys()))
         else:
             view = self._internal
 
@@ -1263,6 +1325,79 @@ class TableEntry(Entry[TableEntryInternal]):
 
         return self.reader().schema()
 
+    def register_blueprint(self, uri: str, set_default: bool = True) -> None:
+        """
+        Register an existing .rbl visible to the server as this table's blueprint.
+
+        By default, also set this blueprint as default.
+
+        The associated blueprint dataset is owned by this table for lifecycle purposes.
+        Deleting this table also deletes the associated blueprint dataset and its storage.
+
+        !!! note
+            ⚠️ This API is experimental and may change or be removed in future versions! ⚠️
+            TODO(#12746): Stabilize table blueprint APIs.
+        """
+
+        blueprint_dataset = self.blueprint_dataset()
+
+        segment_id = (
+            blueprint_dataset.register([uri], on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait().segment_ids[0]
+        )
+
+        if set_default:
+            self.set_default_blueprint(segment_id)
+
+    def blueprints(self) -> list[str]:
+        """
+        Lists all blueprints currently registered with this table.
+
+        !!! note
+            ⚠️ This API is experimental and may change or be removed in future versions! ⚠️
+            TODO(#12746): Stabilize table blueprint APIs.
+        """
+
+        return self.blueprint_dataset().segment_ids()
+
+    def set_default_blueprint(self, blueprint_name: str | None) -> None:
+        """
+        Set an already-registered blueprint as default for this table.
+
+        !!! note
+            ⚠️ This API is experimental and may change or be removed in future versions! ⚠️
+            TODO(#12746): Stabilize table blueprint APIs.
+        """
+
+        return self._internal.set_default_blueprint_segment_id(blueprint_name)
+
+    def default_blueprint(self) -> str | None:
+        """
+        Return the name currently set blueprint.
+
+        !!! note
+            ⚠️ This API is experimental and may change or be removed in future versions! ⚠️
+            TODO(#12746): Stabilize table blueprint APIs.
+        """
+
+        return self._internal.default_blueprint_segment_id()
+
+    def blueprint_dataset(self) -> DatasetEntry:
+        """
+        The associated blueprint dataset.
+
+        Tables get a blueprint dataset automatically when they are created.
+        For tables created by older servers, this creates the missing blueprint dataset before returning.
+
+        The associated blueprint dataset is owned by this table for lifecycle purposes.
+        Deleting this table also deletes the associated blueprint dataset and its storage.
+
+        !!! note
+            ⚠️ This API is experimental and may change or be removed in future versions! ⚠️
+            TODO(#12746): Stabilize table blueprint APIs.
+        """
+
+        return DatasetEntry(self._internal.blueprint_dataset())
+
     # ---
 
     def append(
@@ -1423,10 +1558,7 @@ def _python_objects_to_record_batch(schema: pa.Schema, named_params: dict[str, A
                 )
 
                 if pa.types.is_list(field.type) or pa.types.is_large_list(field.type):
-                    error += (
-                        f" Hint: For single-row list-typed columns, wrap your list in another list: "
-                        f"{name}=[[...]] instead of {name}=[...]"  # NOLINT
-                    )
+                    error += f" Hint: For single-row list-typed columns, wrap your list in another list: {name}=[[…]] instead of {name}=[…]"
 
                 raise ValueError(error)
 

@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use nohash_hasher::IntMap;
-use re_byte_size::SizeBytes;
-use re_chunk_store::ChunkStore;
+use re_byte_size::SizeBytes as _;
+use re_chunk_store::{ChunkStore, LatestAtQuery, MissingChunkReporter};
+use re_entity_db::EntityDb;
 use re_log_types::{EntityPath, EntityPathHash, TimeInt, TimelineName};
 use re_sdk_types::ChunkId;
 
@@ -17,12 +18,14 @@ use crate::transform_resolution_cache::iter_relevant_rows_in_chunk;
 
 use super::iter_relevant_rows_in_chunk_with_child_frames;
 use super::pose_transform_for_entity::PoseTransformForEntity;
+use super::transform_cache_snapshot;
 use super::tree_transforms_for_child_frame::TreeTransformsForChildFrame;
 
 /// Cached transforms for a single timeline.
 ///
 /// Includes any static transforms that may apply globally.
 /// Therefore, this can't be trivially constructed.
+#[derive(re_byte_size::SizeBytes)]
 pub struct CachedTransformsForTimeline {
     /// Transforms information for each child frame to a parent frame over time.
     // Note that these are potentially a lot of mutexes, but `parking_lot`-Mutex are incredibly lightweight on all platforms, so not a memory concern.
@@ -176,10 +179,10 @@ impl CachedTransformsForTimeline {
         if aspects.contains(TransformAspect::Clear) {
             let component = re_sdk_types::archetypes::Clear::descriptor_is_recursive().component;
 
-            for ((time, _row_id), is_recursive_slice) in chunk
-                .iter_component_indices(timeline, component)
-                .zip(chunk.iter_slices::<bool>(component))
-            {
+            for ((time, _row_id), is_recursive_slice) in std::iter::zip(
+                chunk.iter_component_indices(timeline, component),
+                chunk.iter_slices::<bool>(component),
+            ) {
                 if let Some(is_recursive) = is_recursive_slice.values().first()
                     && *is_recursive != 0
                 {
@@ -211,10 +214,10 @@ impl CachedTransformsForTimeline {
         if aspects.contains(TransformAspect::Clear) {
             let component = re_sdk_types::archetypes::Clear::descriptor_is_recursive().component;
 
-            for ((time, _row_id), is_recursive_slice) in chunk
-                .iter_component_indices(timeline, component)
-                .zip(chunk.iter_slices::<bool>(component))
-            {
+            for ((time, _row_id), is_recursive_slice) in std::iter::zip(
+                chunk.iter_component_indices(timeline, component),
+                chunk.iter_slices::<bool>(component),
+            ) {
                 if let Some(is_recursive) = is_recursive_slice.values().first()
                     && *is_recursive != 0
                 {
@@ -503,23 +506,24 @@ impl CachedTransformsForTimeline {
     pub fn all_child_frames(&self) -> impl Iterator<Item = TransformFrameIdHash> {
         self.per_child_frame_transforms.keys().copied()
     }
-}
 
-impl SizeBytes for CachedTransformsForTimeline {
-    fn heap_size_bytes(&self) -> u64 {
-        re_tracing::profile_function!();
-
-        let Self {
-            per_child_frame_transforms,
-            non_recursive_clears,
-            recursive_clears,
-            per_entity_poses,
-        } = self;
-
-        per_child_frame_transforms.heap_size_bytes()
-            + non_recursive_clears.heap_size_bytes()
-            + recursive_clears.heap_size_bytes()
-            + per_entity_poses.heap_size_bytes()
+    /// Returns a snapshot of this timeline's transform cache for a single latest-at time.
+    pub fn latest_at_transform_cache_snapshot(
+        &self,
+        frame_id_registry: &FrameIdRegistry,
+        entity_db: &EntityDb,
+        missing_chunk_reporter: &MissingChunkReporter,
+        query: &LatestAtQuery,
+        filter: transform_cache_snapshot::SnapshotFilter,
+    ) -> transform_cache_snapshot::Snapshot {
+        transform_cache_snapshot::latest_at(
+            self,
+            frame_id_registry,
+            entity_db,
+            missing_chunk_reporter,
+            query,
+            filter,
+        )
     }
 }
 

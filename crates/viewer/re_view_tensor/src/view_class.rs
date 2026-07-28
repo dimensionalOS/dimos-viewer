@@ -32,7 +32,7 @@ pub struct TensorView;
 
 type ViewType = re_sdk_types::blueprint::views::TensorView;
 
-#[derive(Default)]
+#[derive(Default, re_byte_size::SizeBytes)]
 pub struct ViewTensorState {
     /// Last viewed tensor, copied each frame.
     /// Used for the selection view.
@@ -46,6 +46,10 @@ impl ViewState for ViewTensorState {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+
+    fn heap_size_bytes(&self) -> u64 {
+        re_byte_size::SizeBytes::heap_size_bytes(self)
     }
 }
 
@@ -151,9 +155,9 @@ Set the displayed dimensions in a selection panel.",
 
         // TODO(#6075): Listitemify
         if let Some(TensorVisualization { tensor, .. }) = &state.tensor {
-            let slice_property = ViewProperty::from_archetype::<
+            let slice_property = ViewProperty::from_archetype_for_view::<
                 re_sdk_types::blueprint::archetypes::TensorSliceSelection,
-            >(ctx.blueprint_db(), ctx.blueprint_query, view_id);
+            >(ctx, view_id);
             let slice_selection = TensorSliceSelection::load_and_make_valid(
                 &slice_property,
                 &TensorDimension::from_tensor_data(tensor),
@@ -220,8 +224,8 @@ Set the displayed dimensions in a selection panel.",
         let state = state.downcast_mut::<ViewTensorState>()?;
         state.tensor = None;
 
-        let tensors =
-            system_output.visualizer_data::<Vec<TensorVisualization>>(TensorSystem::identifier())?;
+        let tensors = system_output
+            .visualizer_data_or_default::<Vec<TensorVisualization>>(TensorSystem::identifier())?;
 
         let response = {
             let mut ui = ui.new_child(egui::UiBuilder::new().sense(egui::Sense::click()));
@@ -280,9 +284,9 @@ impl TensorView {
     ) -> Result<(), ViewSystemExecutionError> {
         re_tracing::profile_function!();
 
-        let slice_property = ViewProperty::from_archetype::<
+        let slice_property = ViewProperty::from_archetype_for_view::<
             re_sdk_types::blueprint::archetypes::TensorSliceSelection,
-        >(ctx.blueprint_db(), ctx.blueprint_query, view_id);
+        >(ctx, view_id);
         let slice_selection = TensorSliceSelection::load_and_make_valid(
             &slice_property,
             &TensorDimension::from_tensor_data(tensor),
@@ -373,11 +377,7 @@ impl TensorView {
             data_range,
         } = &tensor_view;
 
-        let scalar_mapping = ViewProperty::from_archetype::<TensorScalarMapping>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query(),
-            ctx.view_id,
-        );
+        let scalar_mapping = ViewProperty::from_archetype::<TensorScalarMapping>(ctx);
         let colormap: Colormap = scalar_mapping
             .component_or_fallback(ctx, TensorScalarMapping::descriptor_colormap().component)?;
         let gamma: GammaCorrection = scalar_mapping
@@ -399,12 +399,8 @@ impl TensorView {
         )?;
         let [width, height] = colormapped_texture.width_height();
 
-        let view_fit: ViewFit = ViewProperty::from_archetype::<TensorViewFit>(
-            ctx.blueprint_db(),
-            ctx.blueprint_query(),
-            ctx.view_id,
-        )
-        .component_or_fallback(ctx, TensorViewFit::descriptor_scaling().component)?;
+        let view_fit: ViewFit = ViewProperty::from_archetype::<TensorViewFit>(ctx)
+            .component_or_fallback(ctx, TensorViewFit::descriptor_scaling().component)?;
 
         let img_size = egui::vec2(width as _, height as _);
         let img_size = Vec2::max(Vec2::splat(1.0), img_size); // better safe than sorry
@@ -438,6 +434,7 @@ impl TensorView {
             image_rect,
             colormapped_texture,
             texture_options,
+            ctx.view_id.render_view_id(),
             re_renderer::Label::from("tensor_slice"),
         )?;
 
@@ -482,10 +479,11 @@ pub fn selected_tensor_slice<'a, T: Copy>(
         tensor.view()
     };
 
-    let axis = [dheight as usize, dwidth as usize]
-        .into_iter()
-        .chain(indices.iter().map(|s| s.dimension as usize))
-        .collect::<Vec<_>>();
+    let axis = std::iter::chain(
+        [dheight as usize, dwidth as usize],
+        indices.iter().map(|s| s.dimension as usize),
+    )
+    .collect::<Vec<_>>();
     let mut slice = view.permuted_axes(axis);
 
     for index_selection in indices {

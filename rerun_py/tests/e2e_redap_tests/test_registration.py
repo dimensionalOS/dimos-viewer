@@ -33,29 +33,6 @@ def temp_empty_directory() -> Iterator[str]:
     os.rmdir(tmp_dir)
 
 
-@pytest.fixture(scope="function")
-def recording_factory(tmp_path: Path) -> Callable[[Sequence[str]], list[str]]:
-    """
-    Factory fixture for creating test recordings with known recording IDs.
-
-    Returns a callable that takes a sequence of recording IDs and returns the
-    corresponding file URIs.
-    """
-
-    def create_recordings(recording_ids: Sequence[str]) -> list[str]:
-        uris = []
-        for i, recording_id in enumerate(recording_ids):
-            rrd_path = tmp_path / f"recording_{i}.rrd"
-            with rr.RecordingStream(f"test_recording_{i}", recording_id=recording_id) as rec:
-                rec.save(rrd_path)
-                rec.log("points", rr.Points2D([[i, i]]))
-                rec.flush()
-            uris.append(rrd_path.absolute().as_uri())
-        return uris
-
-    return create_recordings
-
-
 @pytest.mark.local_only
 def test_registration_invalidargs(
     catalog_client: CatalogClient, temp_empty_file: str, temp_empty_directory: str
@@ -88,7 +65,7 @@ def test_register_single_with_wait(
 
     ds = entry_factory.create_dataset("test_register_single")
 
-    handle = ds.register(uris[0])
+    handle = ds.register([uris[0]])
     result = handle.wait()
 
     assert len(result.segment_ids) == 1
@@ -106,7 +83,7 @@ def test_register_single_with_iter_results(
 
     ds = entry_factory.create_dataset("test_register_iter")
 
-    handle = ds.register(uris[0])
+    handle = ds.register([uris[0]])
     results = list(handle.iter_results())
 
     assert len(results) == 1
@@ -267,7 +244,7 @@ def test_register_with_layer_name(
 
     ds = entry_factory.create_dataset("test_layer_name")
 
-    handle = ds.register(uris[0], layer_name="custom_layer")
+    handle = ds.register([uris[0]], layer_name="custom_layer")
     result = handle.wait()
 
     assert len(result.segment_ids) == 1
@@ -408,10 +385,10 @@ def test_failed_registration_not_in_segment_table(entry_factory: EntryFactory, t
 
     dataset = entry_factory.create_dataset("test_conflicting_property_schema")
 
-    dataset.register(seg_1_path.as_uri()).wait()
+    dataset.register([seg_1_path.as_uri()]).wait()
 
     with pytest.raises(ValueError, match="schema"):
-        dataset.register(seg_2_path.as_uri()).wait()
+        dataset.register([seg_2_path.as_uri()]).wait()
 
     # Verify it's segment1 (the successful one), not segment2 (the failed one)
     segment_ids = dataset.segment_ids()
@@ -439,11 +416,11 @@ def test_failed_layer_registration_not_in_segment_table(entry_factory: EntryFact
     dataset = entry_factory.create_dataset("test_failed_layer_not_in_segment_table")
 
     # Register base layer - should succeed
-    dataset.register(base_path.as_uri(), layer_name="base").wait()
+    dataset.register([base_path.as_uri()], layer_name="base").wait()
 
     # Register extra layer with conflicting schema - should fail
     with pytest.raises(ValueError, match="schema"):
-        dataset.register(extra_path.as_uri(), layer_name="extra").wait()
+        dataset.register([extra_path.as_uri()], layer_name="extra").wait()
 
     # The segment table should still show the segment (because the base layer succeeded)
     df = dataset.segment_table()
@@ -471,14 +448,14 @@ def test_register_duplicate_error_behavior(
     ds = entry_factory.create_dataset("test_dup_error")
 
     # First registration should succeed
-    handle = ds.register(uris[0], on_duplicate=OnDuplicateSegmentLayer.ERROR)
+    handle = ds.register([uris[0]], on_duplicate=OnDuplicateSegmentLayer.ERROR)
     result = handle.wait()
     assert len(result.segment_ids) == 1
     assert result.segment_ids[0] == recording_id
 
     # Second registration of the same segment should fail
     with pytest.raises(AlreadyExistsError, match="already exists"):
-        ds.register(uris[0], on_duplicate=OnDuplicateSegmentLayer.ERROR).wait()
+        ds.register([uris[0]], on_duplicate=OnDuplicateSegmentLayer.ERROR).wait()
 
 
 @pytest.mark.local_only
@@ -495,7 +472,7 @@ def test_register_duplicate_ignore_behavior(
     ds = entry_factory.create_dataset("test_dup_ignore")
 
     # First registration
-    handle = ds.register(uris[0], on_duplicate=OnDuplicateSegmentLayer.SKIP)
+    handle = ds.register([uris[0]], on_duplicate=OnDuplicateSegmentLayer.SKIP)
     result = handle.wait()
     assert len(result.segment_ids) == 1
     assert result.segment_ids[0] == recording_id
@@ -505,7 +482,7 @@ def test_register_duplicate_ignore_behavior(
     assert points == [[0.0, 0.0]], f"Expected [[0.0, 0.0]] but got {points}"
 
     # Second registration should succeed but not replace the data
-    handle = ds.register(uris[1], on_duplicate=OnDuplicateSegmentLayer.SKIP)
+    handle = ds.register([uris[1]], on_duplicate=OnDuplicateSegmentLayer.SKIP)
     result = handle.wait()
     # The result still contains the segment_id even though it was skipped
     assert len(result.segment_ids) == 1
@@ -534,7 +511,7 @@ def test_register_duplicate_replace_behavior(
     ds = entry_factory.create_dataset("test_dup_replace")
 
     # First registration
-    handle = ds.register(uris[0], on_duplicate=OnDuplicateSegmentLayer.REPLACE)
+    handle = ds.register([uris[0]], on_duplicate=OnDuplicateSegmentLayer.REPLACE)
     result = handle.wait()
     assert len(result.segment_ids) == 1
     assert result.segment_ids[0] == recording_id
@@ -544,7 +521,7 @@ def test_register_duplicate_replace_behavior(
     assert points == [[0.0, 0.0]], f"Expected [[0.0, 0.0]] but got {points}"
 
     # Second registration should succeed and replace the data
-    handle = ds.register(uris[1], on_duplicate=OnDuplicateSegmentLayer.REPLACE)
+    handle = ds.register([uris[1]], on_duplicate=OnDuplicateSegmentLayer.REPLACE)
     result = handle.wait()
     assert len(result.segment_ids) == 1
 
@@ -611,7 +588,7 @@ def test_registration_crossregion(catalog_client: CatalogClient) -> None:
 
 @pytest.mark.aws_only
 def test_registration_footerless(catalog_client: CatalogClient) -> None:
-    """Tests whether registration of footerless datasets fails as expected on Rerun Cloud."""
+    """Tests whether registration of footerless datasets fails as expected on Rerun Hub."""
 
     dataset_url = "s3://rerun-redap-datasets-pdx/test-resources/dataset-footerless/"
     expected_msg = "try running `rerun rrd migrate`"

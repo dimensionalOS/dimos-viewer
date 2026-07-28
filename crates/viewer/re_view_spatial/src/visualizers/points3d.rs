@@ -2,14 +2,21 @@ use std::sync::Arc;
 
 use itertools::Itertools as _;
 use nohash_hasher::IntMap;
+use parking_lot::Mutex;
 use re_byte_size::SizeBytes as _;
 use re_entity_db::EntityDb;
 use re_log_types::hash::Hash64;
-use re_renderer::{LineDrawableBuilder, PickingLayerInstanceId, PointCloudBuilder, PositionRadius};
+use re_renderer::{
+    LineDrawableBuilder, PickingLayerInstanceId, PointCloudBuilder, PositionRadius,
+    renderer::PointCloudSortOrderCache,
+};
 use re_sdk_types::Archetype as _;
 use re_sdk_types::ArrowString;
 use re_sdk_types::archetypes::Points3D;
-use re_sdk_types::components::{ClassId, Color, KeypointId, Position3D, Radius, ShowLabels};
+use re_sdk_types::components::{
+    ClassId, Color, KeypointId, PointShading, Position3D, Radius, ShowLabels,
+};
+use re_sdk_types::reflection::Enum as _;
 use re_view::{process_annotation_and_keypoint_slices, process_color_slice};
 use re_viewer_context::{
     Cache, IdentifiedViewSystem, QueryContext, ResolvedAnnotationInfos, ViewClass as _,
@@ -19,6 +26,7 @@ use re_viewer_context::{
 
 use super::utilities::LabeledBatch;
 use super::{Keypoints, SpatialViewVisualizerData, process_labels_3d};
+use crate::SpaceKind;
 use crate::contexts::SpatialSceneVisualizerInstructionContext;
 use crate::visualizers::{load_keypoint_connections, process_radius_slice};
 
@@ -43,6 +51,7 @@ struct Points3DComponentData<'a> {
 
     // Non-repeated
     show_labels: Option<ShowLabels>,
+    point_shading: Option<PointShading>,
 }
 
 /// Processed/computed point cloud data ready for rendering.
@@ -50,13 +59,25 @@ struct Points3DComponentData<'a> {
 /// This bundles together the results of processing raw component data
 /// (computing annotations, colors, radii, bounding boxes, etc.)
 /// so that it can be memoized based on `data.query_hash`.
+#[derive(re_byte_size::SizeBytes)]
 struct Points3DCpu {
     position_radii: Vec<PositionRadius>,
+
+    #[size_bytes(ignore)] // Lives entirely on the stack.
     point_cloud_bounds: re_renderer::util::PointCloudBounds,
+
     picking_ids: Vec<PickingLayerInstanceId>,
     annotation_infos: ResolvedAnnotationInfos,
     keypoints: Keypoints,
     colors: Vec<egui::Color32>,
+
+    /// Whether any point has a non-opaque color, requiring alpha-blended rendering.
+    has_transparency: bool,
+
+    /// Scratch buffers holding the back-to-front point ordering across frames.
+    ///
+    /// Each instance transform has its own cache, which tracks ordering per rendered view.
+    sort_order_caches: Mutex<Vec<PointCloudSortOrderCache>>,
 }
 
 impl Points3DCpu {
@@ -109,6 +130,8 @@ impl Points3DCpu {
 
         let position_radii = PositionRadius::from_many(positions, &radii);
 
+        let has_transparency = colors.iter().any(|c| !c.is_opaque());
+
         Self {
             position_radii,
             point_cloud_bounds,
@@ -116,24 +139,15 @@ impl Points3DCpu {
             annotation_infos,
             keypoints,
             colors,
+            has_transparency,
+            sort_order_caches: Mutex::new(Vec::new()),
         }
     }
 
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            position_radii,
-            point_cloud_bounds: _,
-            picking_ids,
-            annotation_infos,
-            keypoints,
-            colors,
-        } = self;
-
-        (position_radii.capacity() * std::mem::size_of::<PositionRadius>()) as u64
-            + picking_ids.heap_size_bytes()
-            + annotation_infos.heap_size_bytes()
-            + keypoints.heap_size_bytes()
-            + colors.heap_size_bytes()
+    fn sort_order_cache(&self, transform_index: usize) -> PointCloudSortOrderCache {
+        let mut caches = self.sort_order_caches.lock();
+        caches.resize_with(transform_index + 1, PointCloudSortOrderCache::default);
+        caches[transform_index].clone()
     }
 }
 
@@ -223,7 +237,9 @@ impl re_byte_size::SizeBytes for Points3DCache {
         // Count the underlying data of the Arc directly instead of weighing active
         cache
             .values()
-            .map(|entry| entry.cpu.heap_size_bytes() + std::mem::size_of_val(&entry.cpu) as u64)
+            .map(|entry| {
+                entry.cpu.as_ref().heap_size_bytes() + std::mem::size_of_val(&entry.cpu) as u64
+            })
             .sum::<u64>()
             + (cache.capacity() * std::mem::size_of::<(Hash64, Points3DCacheEntry)>()) as u64
     }
@@ -250,6 +266,13 @@ impl Points3DVisualizer {
         re_tracing::profile_function!();
         let entity_path = ctx.target_entity_path;
 
+        // Opt-in due to the cost of CPU-sorting transparent point clouds every frame.
+        let transparency_enabled = ctx
+            .viewer_ctx()
+            .app_options()
+            .experimental
+            .point_cloud_transparency;
+
         for data in data {
             let num_instances = data.positions.len();
             if num_instances == 0 {
@@ -266,24 +289,37 @@ impl Points3DVisualizer {
                     Points3DCpu::compute(ctx, entity_path, query, ent_context, &data)
                 })
             });
+            let point_shading = data.point_shading.unwrap_or_else(|| {
+                typed_fallback_for(ctx, Points3D::descriptor_point_shading().component)
+            });
 
             // TODO(grtlr): The following is a quick fix to get multiple instance poses to work
             // with point clouds: We sent the same point cloud multiple times to the GPU (bad
             // for memory) and render them with multiple draw calls across different batches (bad
             // for performance).
-            for world_from_obj in ent_context
+            for (transform_index, world_from_obj) in ent_context
                 .transform_info
                 .target_from_instances()
                 .iter()
                 .map(|transform| transform.as_affine3a())
+                .enumerate()
             {
                 re_tracing::profile_scope!("one-transform");
 
-                let point_batch = point_builder
+                let alpha_blend = transparency_enabled && cpu.has_transparency;
+
+                let mut point_batch = point_builder
                     .batch(entity_path.to_string())
+                    .enable_shading(matches!(point_shading, PointShading::Gradient))
+                    .enable_alpha_blending(alpha_blend)
                     .world_from_obj(world_from_obj)
+                    .object_space_bounding_box(cpu.point_cloud_bounds.bbox)
                     .outline_mask_ids(ent_context.highlight.overall)
                     .picking_object_id(re_renderer::PickingLayerObjectId(entity_path.hash64()));
+
+                if alpha_blend {
+                    point_batch = point_batch.sort_order(cpu.sort_order_cache(transform_index));
+                }
 
                 let mut point_range_builder =
                     point_batch.add_points(&cpu.position_radii, &cpu.colors, &cpu.picking_ids);
@@ -310,6 +346,7 @@ impl Points3DVisualizer {
                     cpu.point_cloud_bounds.bbox,
                     cpu.point_cloud_bounds.region_of_interest,
                     world_from_obj,
+                    SpaceKind::ThreeD,
                 );
 
                 load_keypoint_connections(
@@ -345,7 +382,10 @@ impl Points3DVisualizer {
 
 impl IdentifiedViewSystem for Points3DVisualizer {
     fn identifier() -> re_viewer_context::ViewSystemIdentifier {
-        "Points3D".into()
+        re_viewer_context::external::re_string_interner::intern_static!(
+            re_viewer_context::ViewSystemIdentifier,
+            "Points3D"
+        )
     }
 }
 
@@ -426,10 +466,12 @@ impl VisualizerSystem for Points3DVisualizer {
                     results.iter_optional(Points3D::descriptor_keypoint_ids().component);
                 let all_show_labels =
                     results.iter_optional(Points3D::descriptor_show_labels().component);
+                let all_point_shading =
+                    results.iter_optional(Points3D::descriptor_point_shading().component);
 
                 let query_result_hash = results.query_result_hash();
 
-                let results_iter = re_query::range_zip_1x6(
+                let results_iter = re_query::range_zip_1x7(
                     all_positions.slice::<[f32; 3]>(), // RowId 5
                     all_colors.slice::<u32>(),         // RowId 7
                     all_radii.slice::<f32>(),
@@ -437,6 +479,7 @@ impl VisualizerSystem for Points3DVisualizer {
                     all_class_ids.slice::<u16>(),
                     all_keypoint_ids.slice::<u16>(),
                     all_show_labels.slice::<bool>(),
+                    all_point_shading.slice::<u8>(),
                 )
                 .map(
                     |(
@@ -448,6 +491,7 @@ impl VisualizerSystem for Points3DVisualizer {
                         class_ids,
                         keypoint_ids,
                         show_labels,
+                        point_shading,
                     )| {
                         Points3DComponentData {
                             index,
@@ -463,6 +507,8 @@ impl VisualizerSystem for Points3DVisualizer {
                             show_labels: show_labels
                                 .map(|b| !b.is_empty() && b.value(0))
                                 .map(Into::into),
+                            point_shading: point_shading
+                                .and_then(|s| PointShading::from_integer_slice(s).next()?),
                         }
                     },
                 );

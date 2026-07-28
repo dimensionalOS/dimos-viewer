@@ -4,9 +4,12 @@
 //! See [`Lens`] for more details and assumptions.
 
 pub mod op;
+mod runtime;
 
-// Re-export core types for backward compatibility.
+pub use self::runtime::default_runtime;
+
+// Re-export the core lenses types.
 pub use re_lenses_core::{
-    ChunkExt, Lens, LensBuilder, LensBuilderError, LensRuntimeError, Lenses, OutputBuilder,
-    OutputMode, PartialChunk,
+    CastTo, ChunkExt, DeriveLensBuilder, Lens, LensBuilderError, LensError, LensRuntimeError,
+    Lenses, MutateLensBuilder, OutputMode, Runtime, Selector, function_registry,
 };

@@ -1,27 +1,28 @@
-use std::fs::File;
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::io::SeekFrom;
 use std::sync::Arc;
 
+use futures::{AsyncReadExt as _, AsyncSeekExt as _};
+use itertools::Itertools as _;
 use re_chunk::{Chunk, ChunkId};
 use re_span::Span;
 
 use crate::RrdManifest;
 use crate::ToApplication as _;
-use crate::rrd::CodecError;
+use crate::rrd::{AsyncReadAt, CodecError};
 
 /// Maximum gap between two chunk spans that will still be merged into a single I/O read.
 /// Spans separated by more than this are read independently.
 const MERGE_GAP_BYTES: u64 = 64 * 1024; // 64 KiB
 
-/// Read chunks from an open RRD file by their IDs, using byte offsets from the manifest.
+/// Read chunks from an RRD reader by their IDs, using byte offsets from the manifest.
 ///
 /// Internally sorts requested chunks by byte offset for sequential I/O,
 /// and merges adjacent/nearby spans (within 64 kB) into single reads.
 ///
 /// Returns [`CodecError::ChunkNotInManifest`] if any chunk ID is not in the manifest.
 /// Aborts on first error (no partial results).
-pub fn read_chunks(
-    file: &mut File,
+pub async fn read_chunks<R: AsyncReadAt>(
+    reader: &mut R,
     manifest: &RrdManifest,
     chunk_ids: &[ChunkId],
 ) -> Result<Vec<Arc<Chunk>>, CodecError> {
@@ -44,15 +45,9 @@ pub fn read_chunks(
             let &row = id_to_row
                 .get(&id)
                 .ok_or(CodecError::ChunkNotInManifest { chunk_id: id })?;
-            Ok((
-                id,
-                Span {
-                    start: offsets[row],
-                    len: sizes[row],
-                },
-            ))
+            Ok((id, Span::from_start_len(offsets[row], sizes[row])))
         })
-        .collect::<Result<_, _>>()?;
+        .try_collect()?;
 
     if entries.is_empty() {
         return Ok(Vec::new());
@@ -68,16 +63,16 @@ pub fn read_chunks(
 
     for group in &groups {
         // Read the entire merged span in one I/O call.
-        file.seek(SeekFrom::Start(group.byte_span.start))?;
+        reader.seek(SeekFrom::Start(group.byte_span.start)).await?;
         let mut buf = vec![0u8; usize::try_from(group.byte_span.len)?];
-        file.read_exact(&mut buf)?;
+        reader.read_exact(&mut buf).await?;
 
         // Slice out individual chunks and decode them.
         for &(_chunk_id, chunk_span) in &entries[group.entry_range.clone()] {
-            let local_span = Span {
-                start: usize::try_from(chunk_span.start - group.byte_span.start)?,
-                len: usize::try_from(chunk_span.len)?,
-            };
+            let local_span = Span::from_start_len(
+                usize::try_from(chunk_span.start - group.byte_span.start)?,
+                usize::try_from(chunk_span.len)?,
+            );
             let chunk = decode_chunk_from_bytes(&buf[local_span.range()])?;
             result.push(Arc::new(chunk));
         }
@@ -130,7 +125,10 @@ fn decode_chunk_from_bytes(buf: &[u8]) -> Result<Chunk, CodecError> {
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod tests {
+    use std::fs::File;
+
     use super::*;
     use crate::rrd::test_util::{
         encode_test_rrd, encode_test_rrd_to_file_with_options, make_test_chunks,
@@ -140,9 +138,11 @@ mod tests {
     fn test_read_chunks_roundtrip() {
         let chunks = make_test_chunks(5);
         let (rrd, store_id) = encode_test_rrd(&chunks);
-        let mut file = File::open(rrd.path()).unwrap();
-
-        let footer = crate::read_rrd_footer(&mut file).unwrap().unwrap();
+        let mut footer_file = futures::io::AllowStdIo::new(File::open(rrd.path()).unwrap());
+        let footer = futures::executor::block_on(crate::read_rrd_footer(&mut footer_file))
+            .unwrap()
+            .unwrap();
+        let mut file = futures::io::AllowStdIo::new(File::open(rrd.path()).unwrap());
         let raw_manifest = &footer.manifests[&store_id];
         let manifest = RrdManifest::try_new(raw_manifest).unwrap();
 
@@ -150,7 +150,8 @@ mod tests {
         assert_eq!(chunk_ids.len(), chunks.len());
 
         // Read all chunks.
-        let loaded = read_chunks(&mut file, &manifest, chunk_ids).unwrap();
+        let loaded =
+            futures::executor::block_on(read_chunks(&mut file, &manifest, chunk_ids)).unwrap();
         assert_eq!(loaded.len(), chunks.len());
 
         for (i, loaded_chunk) in loaded.iter().enumerate() {
@@ -163,16 +164,19 @@ mod tests {
     fn test_read_chunks_subset() {
         let chunks = make_test_chunks(5);
         let (rrd, store_id) = encode_test_rrd(&chunks);
-        let mut file = File::open(rrd.path()).unwrap();
-
-        let footer = crate::read_rrd_footer(&mut file).unwrap().unwrap();
+        let mut footer_file = futures::io::AllowStdIo::new(File::open(rrd.path()).unwrap());
+        let footer = futures::executor::block_on(crate::read_rrd_footer(&mut footer_file))
+            .unwrap()
+            .unwrap();
+        let mut file = futures::io::AllowStdIo::new(File::open(rrd.path()).unwrap());
         let raw_manifest = &footer.manifests[&store_id];
         let manifest = RrdManifest::try_new(raw_manifest).unwrap();
 
         // Read only the first and last chunk.
         let chunk_ids = manifest.col_chunk_ids();
         let subset = [chunk_ids[0], chunk_ids[chunk_ids.len() - 1]];
-        let loaded = read_chunks(&mut file, &manifest, &subset).unwrap();
+        let loaded =
+            futures::executor::block_on(read_chunks(&mut file, &manifest, &subset)).unwrap();
         assert_eq!(loaded.len(), 2);
     }
 
@@ -180,14 +184,16 @@ mod tests {
     fn test_read_chunks_unknown_id_errors() {
         let chunks = make_test_chunks(3);
         let (rrd, store_id) = encode_test_rrd(&chunks);
-        let mut file = File::open(rrd.path()).unwrap();
-
-        let footer = crate::read_rrd_footer(&mut file).unwrap().unwrap();
+        let mut footer_file = futures::io::AllowStdIo::new(File::open(rrd.path()).unwrap());
+        let footer = futures::executor::block_on(crate::read_rrd_footer(&mut footer_file))
+            .unwrap()
+            .unwrap();
+        let mut file = futures::io::AllowStdIo::new(File::open(rrd.path()).unwrap());
         let raw_manifest = &footer.manifests[&store_id];
         let manifest = RrdManifest::try_new(raw_manifest).unwrap();
 
         let bogus_id = ChunkId::new();
-        let result = read_chunks(&mut file, &manifest, &[bogus_id]);
+        let result = futures::executor::block_on(read_chunks(&mut file, &manifest, &[bogus_id]));
         assert!(
             matches!(result, Err(crate::CodecError::ChunkNotInManifest { .. })),
             "Expected ChunkNotInManifest error, got: {result:?}"
@@ -275,12 +281,20 @@ mod tests {
             crate::EncodingOptions::PROTOBUF_UNCOMPRESSED,
         );
 
-        let mut file = File::open(rrd.path()).unwrap();
-        let footer = crate::read_rrd_footer(&mut file).unwrap().unwrap();
+        let mut footer_file = futures::io::AllowStdIo::new(File::open(rrd.path()).unwrap());
+        let footer = futures::executor::block_on(crate::read_rrd_footer(&mut footer_file))
+            .unwrap()
+            .unwrap();
+        let mut file = futures::io::AllowStdIo::new(File::open(rrd.path()).unwrap());
         let raw_manifest = &footer.manifests[&store_id];
         let manifest = RrdManifest::try_new(raw_manifest).unwrap();
 
-        let loaded = read_chunks(&mut file, &manifest, manifest.col_chunk_ids()).unwrap();
+        let loaded = futures::executor::block_on(read_chunks(
+            &mut file,
+            &manifest,
+            manifest.col_chunk_ids(),
+        ))
+        .unwrap();
         assert_eq!(loaded.len(), chunks.len());
 
         for (i, loaded_chunk) in loaded.iter().enumerate() {

@@ -69,7 +69,8 @@ namespace rerun::archetypes {
     /// #include <rerun.hpp>
     ///
     /// int main(int argc, char* argv[]) {
-    ///     const auto rec = rerun::RecordingStream("rerun_example_line_strip3d_ui_radius");
+    ///     const auto rec =
+    ///         rerun::RecordingStream("rerun_example_line_strip3d_ui_radius");
     ///     rec.spawn().exit_on_failure();
     ///
     ///     // A blue line with a scene unit radii of 0.01.
@@ -107,6 +108,8 @@ namespace rerun::archetypes {
         std::optional<ComponentBatch> radii;
 
         /// Optional colors for the line strips.
+        ///
+        /// The alpha channel is ignored.
         std::optional<ComponentBatch> colors;
 
         /// Optional text labels for the line strips.
@@ -190,6 +193,8 @@ namespace rerun::archetypes {
         }
 
         /// Optional colors for the line strips.
+        ///
+        /// The alpha channel is ignored.
         LineStrips3D with_colors(const Collection<rerun::components::Color>& _colors) && {
             colors = ComponentBatch::from_loggable(_colors, Descriptor_colors).value_or_throw();
             return std::move(*this);

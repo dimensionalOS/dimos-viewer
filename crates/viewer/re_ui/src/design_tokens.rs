@@ -5,7 +5,7 @@ use anyhow::Context as _;
 use egui::{Color32, Margin, Stroke, Theme, Vec2};
 
 use crate::color_table::{ColorTable, ColorToken, Hue, Scale};
-use crate::{CUSTOM_WINDOW_DECORATIONS, format_with_decimals_in_range};
+use crate::format_with_decimals_in_range;
 
 #[derive(Debug)]
 pub struct AlertVisuals {
@@ -19,14 +19,68 @@ impl AlertVisuals {
         let value = ron.get(name)?;
 
         Ok(Self {
-            fill: color_from_json(color_table, value.get("fill")?)?,
-            icon: color_from_json(color_table, value.get("icon")?)?,
-            text: color_from_json(color_table, value.get("text")?)?,
+            fill: color_from_value(color_table, value.get("fill")?)?,
+            icon: color_from_value(color_table, value.get("icon")?)?,
+            text: color_from_value(color_table, value.get("text")?)?,
         })
     }
 
     fn get(color_table: &ColorTable, ron: &ron::Value, name: &str) -> Self {
         Self::try_get(color_table, ron, name).expect("Failed to parse AlertVisuals")
+    }
+}
+
+/// Colors for a single button [`crate::Variant`].
+#[derive(Debug)]
+pub struct ButtonVisuals {
+    /// Background fill when resting.
+    pub fill: Color32,
+
+    /// Background fill when hovered.
+    pub fill_hovered: Color32,
+
+    /// Background fill when pressed (and while open).
+    pub fill_pressed: Color32,
+
+    /// Text and icon color.
+    pub text: Color32,
+
+    /// Outline around the button. [`Stroke::NONE`] when the variant has no outline.
+    pub stroke: Stroke,
+}
+
+impl ButtonVisuals {
+    fn try_get(color_table: &ColorTable, ron: &ron::Value, name: &str) -> anyhow::Result<Self> {
+        let value = ron.get(name)?;
+
+        Ok(Self {
+            fill: color_from_value(color_table, value.get("fill")?)?,
+            fill_hovered: color_from_value(color_table, value.get("fill_hovered")?)?,
+            fill_pressed: color_from_value(color_table, value.get("fill_pressed")?)?,
+            text: color_from_value(color_table, value.get("text")?)?,
+            stroke: match value.get("stroke") {
+                Ok(stroke) => stroke_from_value(color_table, stroke)?,
+                Err(_) => Stroke::NONE,
+            },
+        })
+    }
+
+    fn get(color_table: &ColorTable, ron: &ron::Value, name: &str) -> Self {
+        Self::try_get(color_table, ron, name).expect("Failed to parse ButtonVisuals")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowFrameConfig {
+    Native,
+    Custom { is_maximized: bool },
+}
+
+impl WindowFrameConfig {
+    pub fn custom(ctx: &egui::Context) -> Self {
+        Self::Custom {
+            is_maximized: ctx.input(|input| input.viewport().maximized == Some(true)),
+        }
     }
 }
 
@@ -65,6 +119,7 @@ pub struct DesignTokens {
     pub shadow_gradient_dark_start: Color32,
     pub tab_bar_color: Color32,
     pub native_frame_stroke: Stroke,
+    pub windows_close_button_hover_color: Color32,
 
     /// Usually black or white
     pub strong_fg_color: Color32,
@@ -189,13 +244,6 @@ pub struct DesignTokens {
     pub extreme_fg_color: Color32,
     pub widget_inactive_bg_fill: Color32,
     pub widget_hovered_color: Color32,
-    pub widget_hovered_weak_bg_fill: Color32,
-    pub widget_hovered_bg_fill: Color32,
-    pub widget_active_weak_bg_fill: Color32,
-    pub widget_active_bg_fill: Color32,
-    pub widget_open_weak_bg_fill: Color32,
-    pub widget_noninteractive_weak_bg_fill: Color32,
-    pub widget_noninteractive_bg_fill: Color32,
     pub widget_noninteractive_bg_stroke: Color32,
     pub text_subdued: Color32,
     pub text_default: Color32,
@@ -208,6 +256,12 @@ pub struct DesignTokens {
     pub alert_info: AlertVisuals,
     pub alert_warning: AlertVisuals,
     pub alert_error: AlertVisuals,
+
+    pub button_primary: ButtonVisuals,
+    pub button_secondary: ButtonVisuals,
+    pub button_ghost: ButtonVisuals,
+    pub button_outlined: ButtonVisuals,
+    pub button_opened: ButtonVisuals,
 
     pub density_graph_selected: Color32,
     pub density_graph_unselected: Color32,
@@ -278,6 +332,12 @@ pub struct DesignTokens {
     pub bg_fill_inverse_hover: Color32,
     pub text_inverse: Color32,
     pub icon_inverse: Color32,
+
+    /// Background of the small timeline scrubber shown under preview thumbnails.
+    pub preview_timeline_track_color: Color32,
+
+    /// Elapsed-time fill of the small timeline scrubber shown under preview thumbnails.
+    pub preview_timeline_progress_color: Color32,
 }
 
 impl DesignTokens {
@@ -289,14 +349,14 @@ impl DesignTokens {
             .expect("Failed to parse data/color_table.ron");
         let colors = load_color_table(&color_table_ron);
 
-        let theme_json: ron::Value = ron::from_str(tokens_ron)
+        let theme_value: ron::Value = ron::from_str(tokens_ron)
             .with_context(|| format!("Failed to parse {theme:?} theme .ron"))?;
 
-        let typography: Typography = parse_path(&theme_json, "{Global.Typography.Default}");
+        let typography: Typography = parse_path(&theme_value, "{Global.Typography.Default}");
 
-        let get_scalar = |scalar_name: &str| try_get_scalar(&theme_json, scalar_name);
-        let get_color = |color_name: &str| get_aliased_color(&colors, &theme_json, color_name);
-        let get_stroke = |stroke_name: &str| get_aliased_stroke(&colors, &theme_json, stroke_name);
+        let get_scalar = |scalar_name: &str| try_get_scalar(&theme_value, scalar_name);
+        let get_color = |color_name: &str| get_aliased_color(&colors, &theme_value, color_name);
+        let get_stroke = |stroke_name: &str| get_aliased_stroke(&colors, &theme_value, stroke_name);
 
         let selection_bg_fill = get_color("selection_bg_fill");
 
@@ -322,6 +382,7 @@ impl DesignTokens {
             shadow_gradient_dark_start: get_color("shadow_gradient_dark_start"),
             tab_bar_color: get_color("tab_bar_color"),
             native_frame_stroke: get_stroke("native_frame_stroke"),
+            windows_close_button_hover_color: get_color("windows_close_button_hover_color"),
             strong_fg_color: get_color("strong_fg_color"),
 
             info_log_text_color: get_color("info_log_text_color"),
@@ -395,13 +456,6 @@ impl DesignTokens {
             extreme_fg_color: get_color("extreme_fg_color"),
             widget_inactive_bg_fill: get_color("widget_inactive_bg_fill"),
             widget_hovered_color: get_color("widget_hovered_color"),
-            widget_hovered_weak_bg_fill: get_color("widget_hovered_weak_bg_fill"),
-            widget_hovered_bg_fill: get_color("widget_hovered_bg_fill"),
-            widget_active_weak_bg_fill: get_color("widget_active_weak_bg_fill"),
-            widget_active_bg_fill: get_color("widget_active_bg_fill"),
-            widget_open_weak_bg_fill: get_color("widget_open_weak_bg_fill"),
-            widget_noninteractive_weak_bg_fill: get_color("widget_noninteractive_weak_bg_fill"),
-            widget_noninteractive_bg_fill: get_color("widget_noninteractive_bg_fill"),
             widget_noninteractive_bg_stroke: get_color("widget_noninteractive_bg_stroke"),
             text_subdued: get_color("text_subdued"),
             text_default: get_color("text_default"),
@@ -409,10 +463,16 @@ impl DesignTokens {
             error_fg_color: get_color("error_fg_color"),
             warn_fg_color: get_color("warn_fg_color"),
 
-            alert_success: AlertVisuals::get(&colors, &theme_json, "alert_success"),
-            alert_info: AlertVisuals::get(&colors, &theme_json, "alert_info"),
-            alert_warning: AlertVisuals::get(&colors, &theme_json, "alert_warning"),
-            alert_error: AlertVisuals::get(&colors, &theme_json, "alert_error"),
+            alert_success: AlertVisuals::get(&colors, &theme_value, "alert_success"),
+            alert_info: AlertVisuals::get(&colors, &theme_value, "alert_info"),
+            alert_warning: AlertVisuals::get(&colors, &theme_value, "alert_warning"),
+            alert_error: AlertVisuals::get(&colors, &theme_value, "alert_error"),
+
+            button_primary: ButtonVisuals::get(&colors, &theme_value, "button_primary"),
+            button_secondary: ButtonVisuals::get(&colors, &theme_value, "button_secondary"),
+            button_ghost: ButtonVisuals::get(&colors, &theme_value, "button_ghost"),
+            button_outlined: ButtonVisuals::get(&colors, &theme_value, "button_outlined"),
+            button_opened: ButtonVisuals::get(&colors, &theme_value, "button_opened"),
 
             popup_shadow_color: get_color("popup_shadow_color"),
 
@@ -484,6 +544,9 @@ impl DesignTokens {
             bg_fill_inverse_hover: get_color("bg_fill_inverse-hover"),
             text_inverse: get_color("text_inverse"),
             icon_inverse: get_color("icon_inverse"),
+
+            preview_timeline_track_color: get_color("preview_timeline_track_color"),
+            preview_timeline_progress_color: get_color("preview_timeline_progress_color"),
         })
     }
 
@@ -816,20 +879,29 @@ impl DesignTokens {
         10.0
     }
 
-    pub fn native_window_corner_radius(&self) -> u8 {
-        10
+    /// Native window corner used unless maximized.
+    pub fn native_window_corner_radius(&self, is_window_maximized: bool) -> u8 {
+        if is_window_maximized { 0 } else { 10 }
     }
 
-    pub fn top_panel_frame(&self) -> egui::Frame {
+    pub fn top_panel_frame(&self, window_frame: WindowFrameConfig) -> egui::Frame {
         let mut frame = egui::Frame {
             inner_margin: self.top_bar_margin(),
             fill: self.top_bar_color,
             ..Default::default()
         };
-        if CUSTOM_WINDOW_DECORATIONS {
-            frame.corner_radius.nw = self.native_window_corner_radius();
-            frame.corner_radius.ne = self.native_window_corner_radius();
+        match window_frame {
+            WindowFrameConfig::Custom { is_maximized } => {
+                let native_corner_radius = self.native_window_corner_radius(is_maximized);
+                frame.corner_radius.nw = native_corner_radius;
+                frame.corner_radius.ne = native_corner_radius;
+                frame.inner_margin.right = 0; // window control buttons are placed right most.
+            }
+            WindowFrameConfig::Native => {
+                frame.corner_radius = 0.0.into();
+            }
         }
+
         frame
     }
 
@@ -846,7 +918,7 @@ impl DesignTokens {
     }
 
     /// For the streams view (time panel)
-    pub fn bottom_panel_frame(&self) -> egui::Frame {
+    pub fn bottom_panel_frame(&self, window_frame: WindowFrameConfig) -> egui::Frame {
         // Show a stroke only on the top. To achieve this, we add a negative outer margin.
         // (on the inner margin we counteract this again)
         let margin_offset = (self.bottom_bar_stroke.width * 0.5) as i8;
@@ -867,9 +939,10 @@ impl DesignTokens {
             corner_radius: 0.0.into(),
             ..Default::default()
         };
-        if CUSTOM_WINDOW_DECORATIONS {
-            frame.corner_radius.sw = self.native_window_corner_radius();
-            frame.corner_radius.se = self.native_window_corner_radius();
+        if let WindowFrameConfig::Custom { is_maximized } = window_frame {
+            let native_corner_radius = self.native_window_corner_radius(is_maximized);
+            frame.corner_radius.sw = native_corner_radius;
+            frame.corner_radius.se = native_corner_radius;
         }
         frame
     }
@@ -898,7 +971,7 @@ impl DesignTokens {
 // ----------------------------------------------------------------------------
 
 trait RonExt {
-    /// Supports path-like access to the JSON structure.
+    /// Supports path-like access to the value structure.
     fn get(&self, path: &str) -> anyhow::Result<&Self> {
         let mut value = self;
         for component in path.split('.') {
@@ -951,29 +1024,31 @@ impl RonExt for ron::Value {
 }
 
 /// Build the [`ColorTable`] based on the content of `design_token.ron`
-fn load_color_table(json: &ron::Value) -> ColorTable {
-    fn get_color_from_json(json: &ron::Value, global_path: &str) -> Color32 {
-        Color32::from_hex(global_path_value(json, global_path).as_str().unwrap()).unwrap()
+fn load_color_table(value: &ron::Value) -> ColorTable {
+    fn get_color_from_value(value: &ron::Value, global_path: &str) -> Option<Color32> {
+        let value = follow_path(value, global_path)?;
+        let hex = value.get_child("value")?.as_str()?;
+        Some(Color32::from_hex(hex).unwrap())
     }
 
+    // Not all hues define every scale (e.g. Gray uses step-50 while others use step-25).
+    // Missing entries get magenta so they're obvious if ever accidentally referenced.
     ColorTable::new(|color_token| {
-        get_color_from_json(
-            json,
-            &format!("{{Global.Color.{}.{}}}", color_token.hue, color_token.scale),
-        )
+        let path = format!("{{Global.Color.{}.{}}}", color_token.hue, color_token.scale);
+        get_color_from_value(value, &path).unwrap_or(Color32::DEBUG_COLOR)
     })
 }
 
 fn try_get_alias_color(
     color_table: &ColorTable,
-    json: &ron::Value,
+    value: &ron::Value,
     color_name: &str,
 ) -> anyhow::Result<Color32> {
-    let color_alias = json.get("Alias")?.get(color_name)?;
-    color_from_json(color_table, color_alias)
+    let color_alias = value.get("Alias")?.get(color_name)?;
+    color_from_value(color_table, color_alias)
 }
 
-fn color_from_json(color_table: &ColorTable, color_alias: &ron::Value) -> anyhow::Result<Color32> {
+fn color_from_value(color_table: &ColorTable, color_alias: &ron::Value) -> anyhow::Result<Color32> {
     let color = color_alias
         .get("color")?
         .as_str()
@@ -1009,32 +1084,43 @@ fn color_from_json(color_table: &ColorTable, color_alias: &ron::Value) -> anyhow
     Ok(color)
 }
 
-fn try_get_scalar(json: &ron::Value, path: &str) -> anyhow::Result<f32> {
-    json.get(path)?
+/// Parse a `{ "color": …, "width": … }` block into a [`Stroke`].
+fn stroke_from_value(color_table: &ColorTable, value: &ron::Value) -> anyhow::Result<Stroke> {
+    let color = color_from_value(color_table, value)?;
+    let width = value
+        .get("width")?
+        .as_f32()
+        .ok_or_else(|| anyhow::anyhow!("stroke 'width' not a number"))?;
+    Ok(Stroke::new(width, color))
+}
+
+fn try_get_scalar(value: &ron::Value, path: &str) -> anyhow::Result<f32> {
+    value
+        .get(path)?
         .as_f32()
         .ok_or_else(|| anyhow::anyhow!("'{path}' not a number"))
 }
 
-fn get_aliased_color(color_table: &ColorTable, json: &ron::Value, alias_path: &str) -> Color32 {
-    try_get_alias_color(color_table, json, alias_path).unwrap_or_else(|err| {
+fn get_aliased_color(color_table: &ColorTable, value: &ron::Value, alias_path: &str) -> Color32 {
+    try_get_alias_color(color_table, value, alias_path).unwrap_or_else(|err| {
         panic!("Failed to get aliased color at {alias_path:?}: {err}");
     })
 }
 
-fn get_aliased_stroke(color_table: &ColorTable, json: &ron::Value, alias_path: &str) -> Stroke {
-    try_get_aliased_stroke(color_table, json, alias_path).unwrap_or_else(|err| {
+fn get_aliased_stroke(color_table: &ColorTable, value: &ron::Value, alias_path: &str) -> Stroke {
+    try_get_aliased_stroke(color_table, value, alias_path).unwrap_or_else(|err| {
         panic!("Failed to get aliased stroke at {alias_path:?}: {err}");
     })
 }
 
 fn try_get_aliased_stroke(
     color_table: &ColorTable,
-    json: &ron::Value,
+    value: &ron::Value,
     alias_path: &str,
 ) -> anyhow::Result<Stroke> {
-    let color_alias = json.get("Alias")?.get(alias_path)?;
+    let color_alias = value.get("Alias")?.get(alias_path)?;
 
-    let color = color_from_json(color_table, color_alias)?;
+    let color = color_from_value(color_table, color_alias)?;
     let width = color_alias
         .get("width")?
         .as_f32()
@@ -1043,27 +1129,27 @@ fn try_get_aliased_stroke(
     Ok(stroke)
 }
 
-fn global_path_value<'json>(value: &'json ron::Value, global_path: &str) -> &'json ron::Value {
+fn global_path_value<'value>(value: &'value ron::Value, global_path: &str) -> &'value ron::Value {
     follow_path_or_panic(value, global_path)
         .get("value")
         .unwrap()
 }
 
-fn parse_path<T: serde::de::DeserializeOwned>(json: &ron::Value, global_path: &str) -> T {
-    let global_value = global_path_value(json, global_path);
+fn parse_path<T: serde::de::DeserializeOwned>(value: &ron::Value, global_path: &str) -> T {
+    let global_value = global_path_value(value, global_path);
     global_value.clone().into_rust().unwrap_or_else(|err| {
         panic!(
-            "Failed to convert {global_path:?} to {}: {err}. Json: {json:?}",
+            "Failed to convert {global_path:?} to {}: {err}. value: {value:?}",
             std::any::type_name::<T>()
         )
     })
 }
 
-fn follow_path_or_panic<'json>(json: &'json ron::Value, json_path: &str) -> &'json ron::Value {
-    follow_path(json, json_path).unwrap_or_else(|| panic!("Failed to find {json_path:?}"))
+fn follow_path_or_panic<'value>(value: &'value ron::Value, value_path: &str) -> &'value ron::Value {
+    follow_path(value, value_path).unwrap_or_else(|| panic!("Failed to find {value_path:?}"))
 }
 
-fn follow_path<'json>(mut value: &'json ron::Value, path: &str) -> Option<&'json ron::Value> {
+fn follow_path<'value>(mut value: &'value ron::Value, path: &str) -> Option<&'value ron::Value> {
     let path = path.strip_prefix('{')?;
     let path = path.strip_suffix('}')?;
     for component in path.split('.') {

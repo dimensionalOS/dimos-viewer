@@ -47,11 +47,11 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
 
       - name: Python format check
         run: pixi run py-fmt-check
@@ -67,11 +67,11 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
 
       - name: Build via mkdocs
         run: |
@@ -80,17 +80,16 @@ jobs:
   no-codegen-changes:
     name: Check if running codegen would produce any changes
     timeout-minutes: 60
-    # TODO(andreas): setup-vulkan doesn't work on 24.4 right now due to missing .so
-    runs-on: ubuntu-22.04-large
+    runs-on: ubuntu-latest-16-cores
     steps:
       # Note: We explicitly don't override `ref` here. We need to see if changes would be made
       # in a context where we have merged with main. Otherwise we might miss changes such as one
       # PR introduces a new type and another PR changes the codegen.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
 
       - name: Codegen check
         run: pixi run codegen --force --check --warnings-as-errors
@@ -101,16 +100,15 @@ jobs:
   rs-lints:
     name: Rust lints (fmt, check, clippy, tests, doc)
     timeout-minutes: 60
-    # TODO(andreas): setup-vulkan doesn't work on 24.4 right now due to missing .so
-    runs-on: ubuntu-22.04-large
+    runs-on: ubuntu-latest-16-cores
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           lfs: true
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
 
       # Install the Vulkan SDK, so we can use the software rasterizer.
       # TODO(andreas): It would be nice if `setup_software_rasterizer.py` could do that for us as well (note though that this action here is very fast when cached!)
@@ -121,6 +119,7 @@ jobs:
           install_runtime: true
           cache: true
           stripdown: true
+          destination: ${{ github.workspace }}/vulkan_sdk
 
       - name: Setup software rasterizer
         run: pixi run python ./scripts/ci/setup_software_rasterizer.py
@@ -135,7 +134,7 @@ jobs:
         run: pixi run rs-check --skip individual_crates docs_slow
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: test-results-linux
@@ -148,14 +147,14 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -167,11 +166,11 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
 
       - name: Toml format check
         run: pixi run toml-fmt-check
@@ -181,11 +180,11 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
 
       - name: Check for too large files
         run: pixi run check-large-files
@@ -195,14 +194,42 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
 
       - name: Check example thumbnails
         run: pixi run uvpy ./scripts/ci/thumbnails.py check
+
+  check-doc-order:
+    name: Check docs order
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          pixi-version: v0.71.3
+
+      - name: Check docs order
+        run: pixi run uvpy ./scripts/ci/check_doc_order.py
+
+  check-no-d2-code-blocks:
+    name: Check for D2 code blocks
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          pixi-version: v0.71.3
+
+      - name: Check for D2 code blocks
+        run: pixi run uvpy ./scripts/ci/check_d2_diagrams.py
 
   spell-check:
     name: Spell Check
@@ -210,7 +237,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Actions Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Check spelling of entire workspace
         uses: crate-ci/typos@v1.45.1
@@ -220,11 +247,11 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
           environments: cpp
 
       - name: Run clang format on all relevant files
@@ -235,11 +262,11 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest-16-cores
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: prefix-dev/setup-pixi@v0.9.4
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
-          pixi-version: v0.55.0
+          pixi-version: v0.71.3
           environments: cpp
 
       # TODO(emilk): make this work somehow. Right now this just results in

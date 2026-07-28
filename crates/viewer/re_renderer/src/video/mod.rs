@@ -5,7 +5,7 @@ use std::collections::hash_map::Entry;
 use ahash::HashMap;
 use re_log::ResultExt as _;
 use re_mutex::Mutex;
-use re_video::player::{DecoderDelayState, VideoPlayerError, VideoPlayerStreamId};
+use re_video::player::{DecoderDelayState, GetVideoSource, VideoPlayerError, VideoPlayerStreamId};
 use re_video::{DecodeSettings, VideoDataDescription};
 
 use crate::RenderContext;
@@ -73,6 +73,7 @@ pub struct VideoFrameTexture {
     pub frame_info: Option<re_video::FrameInfo>,
 }
 
+#[derive(re_byte_size::SizeBytes)]
 struct PlayerEntry {
     player: VideoPlayer,
 
@@ -81,38 +82,16 @@ struct PlayerEntry {
     used_last_frame: bool,
 }
 
-impl re_byte_size::SizeBytes for PlayerEntry {
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            player,
-            used_last_frame: _,
-        } = self;
-        player.heap_size_bytes()
-    }
-}
-
 /// Video data + decoder(s).
 ///
 /// Supports asynchronously decoding video into GPU textures via [`Video::frame_at`].
+#[derive(re_byte_size::SizeBytes)]
 pub struct Video {
     debug_name: String,
     video_description: re_video::VideoDataDescription,
     players: Mutex<HashMap<VideoPlayerStreamId, PlayerEntry>>,
+    #[size_bytes(ignore)]
     decode_settings: DecodeSettings,
-}
-
-impl re_byte_size::SizeBytes for Video {
-    fn heap_size_bytes(&self) -> u64 {
-        let Self {
-            debug_name,
-            video_description,
-            players,
-            decode_settings: _,
-        } = self;
-        debug_name.heap_size_bytes()
-            + video_description.heap_size_bytes()
-            + players.lock().heap_size_bytes()
-    }
 }
 
 impl Drop for Video {
@@ -192,14 +171,14 @@ impl Video {
     ///
     /// The time is specified in seconds since the start of the video.
     ///
-    /// `get_video_buffer` is used both to read data for frames internally, and as a way to request
+    /// `get_video_chunk` is used both to read data for frames internally, and as a way to request
     /// what data should be loaded.
-    pub fn frame_at<'a>(
+    pub fn frame_at(
         &self,
         render_context: &RenderContext,
         player_stream_id: VideoPlayerStreamId,
         video_time: re_video::Time,
-        get_video_buffer: &dyn Fn(re_tuid::Tuid) -> &'a [u8],
+        video_source: &dyn GetVideoSource,
     ) -> FrameDecodingOutput {
         re_tracing::profile_function!();
 
@@ -234,7 +213,7 @@ impl Video {
             &mut |texture, frame| {
                 chunk_decoder::update_video_texture_with_frame(render_context, texture, frame)
             },
-            get_video_buffer,
+            video_source,
         );
 
         let output = decoder_entry.player.output();
@@ -275,10 +254,7 @@ impl Video {
             // If the insertion falls within the player's active GOP range
             // the decoder has a hole of missing samples and needs reset.
             let needs_reset = {
-                let indices = player
-                    .last_enqueued()
-                    .into_iter()
-                    .chain(player.last_requested());
+                let indices = std::iter::chain(player.last_enqueued(), player.last_requested());
 
                 indices
                     .map(|idx| {
@@ -288,8 +264,7 @@ impl Video {
                             .gop_sample_range_for_keyframe(keyframe_idx)
                     })
                     .reduce(|a, b| {
-                        a.zip(b)
-                            .map(|(a, b)| a.start.min(b.start)..a.end.max(b.end))
+                        Option::zip(a, b).map(|(a, b)| a.start.min(b.start)..a.end.max(b.end))
                     })
                     .flatten()
                     .is_some_and(|gop| {

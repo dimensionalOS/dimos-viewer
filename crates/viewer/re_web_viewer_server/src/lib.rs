@@ -27,7 +27,12 @@ mod data {
 
     #[inline]
     pub fn favicon() -> &'static [u8] {
-        include_bytes!("../web_viewer/favicon.svg")
+        include_bytes!("../web_viewer/favicon.ico")
+    }
+
+    #[inline]
+    pub fn apple_touch_icon() -> &'static [u8] {
+        include_bytes!("../web_viewer/apple-touch-icon.png")
     }
 
     #[inline]
@@ -192,6 +197,10 @@ impl WebViewerServer {
         format!("http://{local_addr}")
     }
 
+    pub fn bound_url(&self) -> String {
+        format!("http://{}", self.inner.server.server_addr())
+    }
+
     /// Blocks execution as long as the server is running.
     ///
     /// There's no way of shutting the server down from the outside right now.
@@ -272,8 +281,8 @@ impl WebViewerServerInner {
 
         let (mime, bytes): (&str, &[u8]) = match path {
             "/" | "/index.html" => ("text/html", data::index_html()),
-            "/favicon.svg" => ("image/svg+xml", data::favicon()),
             "/favicon.ico" => ("image/x-icon", data::favicon()),
+            "/apple-touch-icon.png" => ("image/png", data::apple_touch_icon()),
             "/sw.js" => ("text/javascript", data::sw_js()),
             "/re_viewer.js" => ("text/javascript", data::viewer_js()),
             "/re_viewer_bg.wasm" => {
@@ -308,5 +317,19 @@ impl WebViewerServerInner {
         }
 
         request.respond(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unspecified_bind_address_has_distinct_bound_and_connect_urls() {
+        let server = WebViewerServer::new("0.0.0.0", WebViewerServerPort::AUTO).unwrap();
+        let port = server.inner.server.server_addr().to_ip().unwrap().port();
+
+        assert_eq!(server.bound_url(), format!("http://0.0.0.0:{port}"));
+        assert_eq!(server.server_url(), format!("http://127.0.0.1:{port}"));
     }
 }

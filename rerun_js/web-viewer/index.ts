@@ -4,6 +4,33 @@ import type { WebHandle, wasm_bindgen } from "./re_viewer";
 let get_wasm_bindgen: (() => typeof wasm_bindgen) | null = null;
 let _wasm_module: WebAssembly.Module | null = null;
 
+/**
+ * Feature-detect WebAssembly SIMD (`simd128`).
+ *
+ * The viewer .wasm is compiled with `-Ctarget-feature=+simd128`, so a browser
+ * without SIMD support will fail to instantiate the module with a cryptic
+ * `CompileError`. We probe up-front and surface a clear error instead.
+ *
+ * The probe is a minimal module that uses the `v128.any_true` instruction.
+ * Supported in: Chrome 91+, Firefox 89+, Safari 16.4+.
+ */
+function has_wasm_simd(): boolean {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0,
+      10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11,
+    ]));
+  } catch {
+    return false;
+  }
+}
+
+const UNSUPPORTED_BROWSER_MESSAGE =
+  "Your browser is too old to run the Rerun Viewer. " +
+  "The Viewer requires WebAssembly SIMD support, available in " +
+  "Chrome 91+, Firefox 89+, Safari 16.4+, or any modern Chromium-based browser. " +
+  "Please update your browser and try again.";
+
 async function fetch_viewer_js(base_url?: string): Promise<(() => typeof wasm_bindgen)> {
   // @ts-ignore
   return (await import("./re_viewer")).default;
@@ -20,7 +47,7 @@ async function fetch_viewer_wasm(
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(
-      `Failed to fetch viewer WASM: ${response.status} ${response.statusText}`,
+      `Failed to fetch viewer Wasm: ${response.status} ${response.statusText}`,
     );
   }
   return wrap_fetch_with_progress(response, on_progress);
@@ -95,6 +122,10 @@ async function load(
   base_url?: string,
   on_progress?: (received: number, total: number | null) => void,
 ): Promise<typeof wasm_bindgen.WebHandle> {
+  if (!has_wasm_simd()) {
+    throw new Error(UNSUPPORTED_BROWSER_MESSAGE);
+  }
+
   // instantiate wbg globals+module for every invocation of `load`,
   // but don't load the JS/Wasm source every time
   if (!get_wasm_bindgen || !_wasm_module) {
@@ -208,15 +239,6 @@ export interface WebViewerOptions {
    * When not set (default), login UI is hidden. Token-based auth still works.
    */
   login?: LoginOptions;
-}
-
-export interface WebViewerOpenOptions {
-  /**
-   * Whether Rerun should open an HTTP resource in "Following" mode when streaming.
-   *
-   * Defaults to `false`. Ignored for non-HTTP URLs.
-   */
-  follow_if_http?: boolean;
 }
 
 // `AppOptions` and `WebViewerOptions` must be compatible
@@ -430,7 +452,7 @@ function resolveAbsoluteUrl(url: string): string {
  * ```
  *
  * Data may be provided to the Viewer as:
- * - An HTTP file URL, e.g. `viewer.start("https://app.rerun.io/version/0.32.0-alpha.1/examples/dna.rrd")`
+ * - An HTTP file URL, e.g. `viewer.start("https://app.rerun.io/version/0.35.0/examples/dna.rrd")`
  * - A Rerun gRPC URL, e.g. `viewer.start("rerun+http://127.0.0.1:9876/proxy")`
  * - A stream of log messages, via {@link WebViewer.open_channel}.
  *
@@ -464,13 +486,11 @@ export class WebViewer {
    * @param rrd URLs to `.rrd` files or gRPC connections to our SDK.
    * @param parent The element to attach the canvas onto.
    * @param options Web Viewer configuration.
-   * @param open_options Open options forwarded to the initial {@link WebViewer.open} call.
    */
   async start(
     rrd: string | string[] | null,
     parent: HTMLElement | null,
     options: WebViewerOptions | null,
-    open_options: WebViewerOpenOptions | null = null,
   ): Promise<void> {
     parent ??= document.body;
     options ??= {};
@@ -592,7 +612,7 @@ export class WebViewer {
     this.#dispatch_event("ready");
 
     if (rrd) {
-      this.open(rrd, open_options ?? undefined);
+      this.open(rrd);
     }
 
     let self = this;
@@ -745,7 +765,7 @@ export class WebViewer {
    *
    * @param rrd URLs to `.rrd` files or gRPC connections to our SDK.
    */
-  open(rrd: string | string[], options: WebViewerOpenOptions = {}) {
+  open(rrd: string | string[]) {
     if (!this.#handle) {
       throw new Error(`attempted to open \`${rrd}\` in a stopped viewer`);
     }
@@ -753,7 +773,7 @@ export class WebViewer {
     const urls = Array.isArray(rrd) ? rrd : [rrd];
     for (const url of urls) {
       try {
-        this.#handle.add_receiver(url, options.follow_if_http);
+        this.#handle.add_receiver(url);
       } catch (e) {
         this.#fail("Failed to open recording", String(e));
         throw e;

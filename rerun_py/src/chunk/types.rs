@@ -1,9 +1,6 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -11,10 +8,7 @@ use pyo3::types::PyDict;
 use arrow::array::RecordBatch as ArrowRecordBatch;
 use arrow::pyarrow::{PyArrowType, ToPyArrow as _};
 use re_chunk::Chunk;
-use re_chunk_store::{ChunkStore, ChunkStoreConfig, ChunkStoreHandle};
-use re_log_types::{EntityPath, StoreId, StoreInfo, StoreSource};
-
-use crate::recording::PyRecordingInternal;
+use re_log_types::EntityPath;
 
 /// A single chunk of data from a recording.
 #[pyclass(
@@ -93,16 +87,64 @@ impl PyChunkInternal {
         Ok(batch.to_pyarrow(py)?.unbind())
     }
 
-    /// Create a Chunk from a PyArrow RecordBatch with Rerun schema metadata.
+    /// Interpret a PyArrow RecordBatch as Rerun chunk data, one chunk per entity path.
     ///
-    /// The RecordBatch must have been produced by `to_record_batch()` or have
-    /// equivalent Rerun metadata in its schema.
+    /// `index_mode` is one of `"auto"`, `"static"`, or `"columns"`; when it is `"columns"`,
+    /// `index_columns` names the columns to promote to timelines. `entity_path` is the default
+    /// entity path for un-located component columns.
+    ///
+    /// All conversion errors (both `SorbetError` and `ChunkError`) are mapped to `ValueError`, so
+    /// the documented `Raises` contract of `Chunk.from_record_batch` holds.
     #[staticmethod]
-    #[expect(clippy::needless_pass_by_value)] // PyO3 requires owned PyArrowType for #[staticmethod]
-    fn from_record_batch(record_batch: PyArrowType<ArrowRecordBatch>) -> PyResult<Self> {
-        let chunk = Chunk::from_record_batch(&record_batch.0)
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        Ok(Self::new(Arc::new(chunk)))
+    #[pyo3(signature = (record_batch, index_mode, index_columns, entity_path))]
+    #[expect(clippy::needless_pass_by_value)] // PyO3 requires owned arguments for #[staticmethod]
+    fn from_record_batch(
+        record_batch: PyArrowType<ArrowRecordBatch>,
+        index_mode: &str,
+        index_columns: Vec<String>,
+        entity_path: Option<String>,
+    ) -> PyResult<Vec<Self>> {
+        use re_log_types::TimelineName;
+        use re_sorbet::DataframeIndex;
+
+        let index = match index_mode {
+            "auto" => DataframeIndex::Auto,
+            "static" => DataframeIndex::Static,
+            "columns" => DataframeIndex::Columns(
+                index_columns
+                    .iter()
+                    .map(|s| {
+                        TimelineName::try_new(s.as_str())
+                            .map_err(|err| PyValueError::new_err(err.to_string()))
+                    })
+                    .collect::<PyResult<Vec<_>>>()?,
+            ),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Invalid index mode {index_mode:?}; expected \"auto\", \"static\", or \"columns\"."
+                )));
+            }
+        };
+        let entity_path = entity_path.map(|p| EntityPath::parse_forgiving(&p));
+
+        let chunks =
+            Chunk::from_dataframe_record_batch(&record_batch.0, &index, entity_path.as_ref())
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+
+        Ok(chunks
+            .into_iter()
+            .map(|chunk| Self::new(Arc::new(chunk)))
+            .collect())
+    }
+
+    /// Return a copy of this chunk with a new entity path.
+    ///
+    /// A fresh chunk ID is generated to avoid aliasing the original chunk in downstream
+    /// caches and indices. Row IDs, timelines, and components are preserved as-is.
+    fn with_entity_path(&self, entity_path: &str) -> Self {
+        let entity_path = EntityPath::parse_forgiving(entity_path);
+        let chunk = self.chunk.clone_with_new_entity_path(entity_path);
+        Self::new(Arc::new(chunk))
     }
 
     /// Create a Chunk from an entity path, timeline arrays, and component arrays.
@@ -124,12 +166,19 @@ impl PyChunkInternal {
     #[pyo3(signature = (lenses))]
     fn apply_lenses(
         &self,
-        lenses: Vec<PyRef<'_, crate::lenses::PyLensInternal>>,
+        py: Python<'_>,
+        lenses: Vec<crate::lenses::PyLens>,
     ) -> PyResult<Vec<Self>> {
         use re_lenses_core::ChunkExt as _;
 
-        let lenses: Vec<_> = lenses.iter().map(|l| l.inner().clone()).collect();
-        match self.chunk.apply_lenses(&lenses) {
+        let lenses: Vec<_> = lenses
+            .iter()
+            .map(|l| l.build(py))
+            .collect::<PyResult<Vec<_>>>()?;
+        match self
+            .chunk
+            .apply_lenses(&lenses, &re_lenses::default_runtime())
+        {
             Ok(chunks) => Ok(chunks
                 .into_iter()
                 .map(|chunk| Self {
@@ -157,28 +206,36 @@ impl PyChunkInternal {
         use re_lenses_core::ChunkExt as _;
         use re_types_core::ComponentIdentifier;
 
-        let source_id = ComponentIdentifier::from(source);
+        let source_id = ComponentIdentifier::try_new(source)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
 
         let new_chunk = self
             .chunk
-            .apply_selector(source_id, selector.selector())
+            .apply_selector(
+                source_id,
+                selector.selector(),
+                &re_lenses::default_runtime(),
+            )
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
 
         Ok(Self::new(Arc::new(new_chunk)))
     }
 
-    /// Format this chunk as a human-readable table string.
-    ///
-    /// Args:
-    ///     width: Fixed width for the table (default: 240).
-    ///     redact: If true, redact non-deterministic values like RowIds (default: false).
-    #[pyo3(signature = (*, width=240, redact=false))]
-    fn format(&self, width: usize, redact: bool) -> PyResult<String> {
+    /// Format this chunk as a human-readable table string. Internal: the user-facing wrapper sets defaults.
+    #[pyo3(signature = (*, width, redact, trim_metadata_keys))]
+    #[expect(clippy::fn_params_excessive_bools)] // Named keyword args in Python.
+    fn format(&self, width: usize, redact: bool, trim_metadata_keys: bool) -> PyResult<String> {
         let batch = self
             .chunk
             .to_record_batch()
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        Ok(re_arrow_util::format_record_batch_with_width(&batch, Some(width), redact).to_string())
+        let opts = re_arrow_util::RecordBatchFormatOpts {
+            width: Some(width),
+            redact_non_deterministic: redact,
+            trim_metadata_keys,
+            ..Default::default()
+        };
+        Ok(re_arrow_util::format_record_batch_opts(&batch, &opts).to_string())
     }
 
     fn __repr__(&self) -> String {
@@ -194,71 +251,4 @@ impl PyChunkInternal {
     fn __len__(&self) -> usize {
         self.chunk.num_rows()
     }
-}
-
-/// An iterator over chunks in a recording.
-// TODO(RR-4126): currently, the stores we can iterate from are fully loaded in memory, so the
-// `Vec<Arc<_>>` is an acceptable shortcut. In the future, this iterator should be streaming and
-// only load chunks (from file/remote segment) to pipeline over larger-than-ram data.
-#[pyclass(name = "ChunkIterator", module = "rerun_bindings.rerun_bindings")] // NOLINT: ignore[py-cls-eq]
-pub struct PyChunkIterator {
-    chunks: Vec<Arc<Chunk>>,
-    index: AtomicUsize,
-}
-
-impl PyChunkIterator {
-    pub fn new(chunks: Vec<Arc<Chunk>>) -> Self {
-        Self {
-            chunks,
-            index: AtomicUsize::new(0),
-        }
-    }
-}
-
-#[pymethods] // NOLINT: ignore[py-mthd-str]
-impl PyChunkIterator {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(&self) -> PyResult<PyChunkInternal> {
-        let idx = self.index.fetch_add(1, Ordering::Relaxed);
-        if idx < self.chunks.len() {
-            Ok(PyChunkInternal::new(self.chunks[idx].clone()))
-        } else {
-            Err(PyStopIteration::new_err(""))
-        }
-    }
-}
-
-/// Create a new recording from an iterable of chunks.
-#[pyfunction]
-#[expect(clippy::needless_pass_by_value)]
-pub fn recording_from_chunks(
-    py: Python<'_>,
-    chunks: &Bound<'_, PyAny>,
-    application_id: String,
-    recording_id: String,
-) -> PyResult<PyRecordingInternal> {
-    let store_id = StoreId::recording(application_id.as_str(), recording_id.as_str());
-
-    let mut store = ChunkStore::new(store_id.clone(), ChunkStoreConfig::DEFAULT);
-
-    let iter = chunks.try_iter()?;
-    for item in iter {
-        let item: Bound<'_, PyAny> = item?;
-        let chunk_internal: PyRef<'_, PyChunkInternal> = item.extract()?;
-        store
-            .insert_chunk(chunk_internal.inner())
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-    }
-
-    let info = StoreInfo::new(store_id, StoreSource::Other("rerun-sdk-python".into()));
-
-    let _ = py;
-
-    Ok(PyRecordingInternal {
-        store: ChunkStoreHandle::new(store),
-        store_info: Some(info),
-    })
 }

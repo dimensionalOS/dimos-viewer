@@ -11,15 +11,15 @@ use arrow::datatypes::{
     DataType, Field, Fields, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
     UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
-use cdr_encoding::CdrDeserializer;
 use re_chunk::{Chunk, ChunkId};
 use re_ros_msg::MessageSchema;
 use re_ros_msg::deserialize::primitive_array::PrimitiveArray;
-use re_ros_msg::deserialize::{MapResolver, MessageSeed, Value};
-use re_ros_msg::message_spec::{ArraySize, BuiltInType, ComplexType, MessageSpecification, Type};
-use re_sdk_types::ComponentDescriptor;
+use re_ros_msg::deserialize::{MapResolver, Value, decode_message};
+use re_ros_msg::message_spec::{
+    ArraySize, BuiltInType, ComplexType, MessageSpecification, Type, message_package,
+};
 use re_sdk_types::reflection::ComponentDescriptorExt as _;
-use serde::de::DeserializeSeed as _;
+use re_sdk_types::{ArchetypeName, ComponentDescriptor};
 
 use super::ros2::supports_ros2_cdr_channel;
 use crate::parsers::{MessageParser, ParserContext, dds};
@@ -40,15 +40,13 @@ pub fn decode_bytes(top: &MessageSchema, buf: &[u8]) -> anyhow::Result<Value> {
 
     let resolver = MapResolver::new(top.dependencies.iter().map(|dep| (dep.name.clone(), dep)));
 
-    let seed = MessageSeed::new(&top.spec, &resolver);
-
     if representation_identifier.is_big_endian() {
-        let mut de = CdrDeserializer::<byteorder::BigEndian>::new(&buf[4..]);
-        seed.deserialize(&mut de)
+        let mut reader = re_cdr::CdrReader::<byteorder::BigEndian>::new(&buf[4..]);
+        decode_message(&mut reader, &top.spec, &resolver)
             .with_context(|| "failed to deserialize CDR message")
     } else {
-        let mut de = CdrDeserializer::<byteorder::LittleEndian>::new(&buf[4..]);
-        seed.deserialize(&mut de)
+        let mut reader = re_cdr::CdrReader::<byteorder::LittleEndian>::new(&buf[4..]);
+        decode_message(&mut reader, &top.spec, &resolver)
             .with_context(|| "failed to deserialize CDR message")
     }
 }
@@ -109,6 +107,8 @@ impl ArrayBuilder for MessageStructBuilder {
 
 impl Ros2ReflectionMessageParser {
     fn new(num_rows: usize, message_schema: MessageSchema) -> anyhow::Result<Self> {
+        ensure_complex_field_types_resolve(&message_schema)?;
+
         let struct_builder =
             struct_builder_from_message_spec(&message_schema.spec, &message_schema.dependencies)?;
         let builder = FixedSizeListBuilder::with_capacity(struct_builder, 1, num_rows);
@@ -121,7 +121,7 @@ impl Ros2ReflectionMessageParser {
 }
 
 impl MessageParser for Ros2ReflectionMessageParser {
-    fn append(&mut self, _ctx: &mut ParserContext, msg: &mcap::Message<'_>) -> anyhow::Result<()> {
+    fn append(&mut self, ctx: &mut ParserContext, msg: &mcap::Message<'_>) -> anyhow::Result<()> {
         re_tracing::profile_function!();
 
         let value = decode_bytes(&self.message_schema, msg.data.as_ref()).map_err(|err| {
@@ -133,6 +133,17 @@ impl MessageParser for Ros2ReflectionMessageParser {
         })?;
 
         if let Value::Message(message_fields) = value {
+            // If the message carries a header/top-level stamp, also index it on the `ros2_timestamp`
+            // timeline (on top of the automatic `log_time`/`publish_time`).
+            // We do this here in reflection so that _all_ ROS messages, including custom ones,
+            // appear on this timeline (see also: RR-3365).
+            if let Some(nanos) = message_stamp_nanos(&message_fields) {
+                let time_type = ctx.time_type();
+                ctx.add_timestamp_cell(crate::util::TimestampCell::from_nanos_ros2(
+                    nanos, time_type,
+                ));
+            }
+
             let message_struct_builder = self.builder.values();
             let spec = &message_struct_builder.spec;
 
@@ -173,7 +184,7 @@ impl MessageParser for Ros2ReflectionMessageParser {
             mut builder,
         } = *self;
 
-        let archetype_name = message_schema.spec.name.clone().replace('/', ".");
+        let archetype_name = ArchetypeName::try_new(message_schema.spec.name.replace('/', "."))?;
 
         let message_chunk = Chunk::from_auto_row_ids(
             ChunkId::new(),
@@ -185,10 +196,31 @@ impl MessageParser for Ros2ReflectionMessageParser {
             ))
             .collect(),
         )
-        .map_err(|err| Error::Other(anyhow::anyhow!(err)))?;
+        .map_err(Error::other)?;
 
         Ok(vec![message_chunk])
     }
+}
+
+/// The message's stamp as nanoseconds: From a `std_msgs/Header` `stamp`, or a top-level
+/// `builtin_interfaces/Time` `stamp` field (e.g. `rcl_interfaces/Log`). `None` if the message
+/// carries neither.
+fn message_stamp_nanos(fields: &std::collections::BTreeMap<String, Value>) -> Option<u64> {
+    let stamp = match fields.get("header") {
+        Some(Value::Message(header)) => header.get("stamp"),
+        _ => fields.get("stamp"),
+    };
+    let Some(Value::Message(stamp)) = stamp else {
+        return None;
+    };
+    // `builtin_interfaces/Time` is fixed as `int32 sec` / `uint32 nanosec`.
+    let Value::I32(sec) = stamp.get("sec")? else {
+        return None;
+    };
+    let Value::U32(nanosec) = stamp.get("nanosec")? else {
+        return None;
+    };
+    u64::try_from(i64::from(*sec) * 1_000_000_000 + i64::from(*nanosec)).ok()
 }
 
 fn downcast_builder<T: std::any::Any>(
@@ -315,8 +347,8 @@ fn struct_builder_from_message_spec(
         .iter()
         .map(|f| {
             Ok((
-                arrow_field_from_type(&f.ty, &f.name, dependencies)?,
-                arrow_builder_from_type(&f.ty, dependencies)?,
+                arrow_field_from_type(spec, &f.ty, &f.name, dependencies)?,
+                arrow_builder_from_type(spec, &f.ty, dependencies)?,
             ))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -331,15 +363,14 @@ fn struct_builder_from_message_spec(
 }
 
 fn arrow_builder_from_type(
+    scope: &MessageSpecification,
     ty: &Type,
     dependencies: &[MessageSpecification],
 ) -> anyhow::Result<Box<dyn ArrayBuilder>> {
     Ok(match ty {
         Type::BuiltIn(p) => arrow_builder_from_builtin_type(p),
         Type::Complex(complex_type) => {
-            let spec = resolve_complex_type(complex_type, dependencies).ok_or_else(|| {
-                anyhow::anyhow!("Could not resolve complex type: {complex_type:?}")
-            })?;
+            let spec = resolve_complex_type(scope, complex_type, dependencies)?;
             // Some user-defined ROS 2 enum message definitions may only contain
             // primitive-type constants (of same type) and no data field.
             // We should use that common primitive type in this special case.
@@ -349,17 +380,19 @@ fn arrow_builder_from_type(
                 Box::new(struct_builder_from_message_spec(spec, dependencies)?)
             }
         }
-        Type::Array { ty, .. } => {
-            Box::new(ListBuilder::new(arrow_builder_from_type(ty, dependencies)?))
-        }
+        Type::Array { ty, .. } => Box::new(ListBuilder::new(arrow_builder_from_type(
+            scope,
+            ty,
+            dependencies,
+        )?)),
     })
 }
 
 fn arrow_builder_from_builtin_type(ty: &BuiltInType) -> Box<dyn ArrayBuilder> {
     match ty {
         BuiltInType::Bool => Box::new(BooleanBuilder::new()),
-        BuiltInType::Byte | BuiltInType::UInt8 => Box::new(UInt8Builder::new()),
-        BuiltInType::Char | BuiltInType::Int8 => Box::new(Int8Builder::new()),
+        BuiltInType::Byte | BuiltInType::Char | BuiltInType::UInt8 => Box::new(UInt8Builder::new()),
+        BuiltInType::Int8 => Box::new(Int8Builder::new()),
         BuiltInType::Int16 => Box::new(Int16Builder::new()),
         BuiltInType::UInt16 => Box::new(UInt16Builder::new()),
         BuiltInType::Int32 => Box::new(Int32Builder::new()),
@@ -373,23 +406,23 @@ fn arrow_builder_from_builtin_type(ty: &BuiltInType) -> Box<dyn ArrayBuilder> {
 }
 
 fn arrow_field_from_type(
+    scope: &MessageSpecification,
     ty: &Type,
     name: &str,
     dependencies: &[MessageSpecification],
 ) -> anyhow::Result<Field> {
-    datatype_from_type(ty, dependencies).map(|data_type| Field::new(name, data_type, true))
+    datatype_from_type(scope, ty, dependencies).map(|data_type| Field::new(name, data_type, true))
 }
 
 fn datatype_from_type(
+    scope: &MessageSpecification,
     ty: &Type,
     dependencies: &[MessageSpecification],
 ) -> anyhow::Result<DataType> {
     Ok(match ty {
         Type::BuiltIn(p) => datatype_from_builtin_type(p),
         Type::Complex(complex_type) => {
-            let spec = resolve_complex_type(complex_type, dependencies).ok_or_else(|| {
-                anyhow::anyhow!("Could not resolve complex type: {complex_type:?}")
-            })?;
+            let spec = resolve_complex_type(scope, complex_type, dependencies)?;
             // Some user-defined ROS 2 enum message definitions may only contain
             // primitive-type constants (of same type) and no data field.
             // We should use that common primitive type in this special case.
@@ -399,14 +432,14 @@ fn datatype_from_type(
                 let fields = spec
                     .fields
                     .iter()
-                    .map(|f| arrow_field_from_type(&f.ty, &f.name, dependencies))
+                    .map(|f| arrow_field_from_type(spec, &f.ty, &f.name, dependencies))
                     .collect::<anyhow::Result<Fields>>()?;
                 DataType::Struct(fields)
             }
         }
         Type::Array { ty, size } => match size {
             ArraySize::Fixed(_) | ArraySize::Bounded(_) | ArraySize::Unbounded => {
-                DataType::new_list(datatype_from_type(ty, dependencies)?, true)
+                DataType::new_list(datatype_from_type(scope, ty, dependencies)?, true)
             }
         },
     })
@@ -415,8 +448,8 @@ fn datatype_from_type(
 fn datatype_from_builtin_type(ty: &BuiltInType) -> DataType {
     match ty {
         BuiltInType::Bool => DataType::Boolean,
-        BuiltInType::Byte | BuiltInType::UInt8 => DataType::UInt8,
-        BuiltInType::Char | BuiltInType::Int8 => DataType::Int8,
+        BuiltInType::Byte | BuiltInType::Char | BuiltInType::UInt8 => DataType::UInt8,
+        BuiltInType::Int8 => DataType::Int8,
         BuiltInType::Int16 => DataType::Int16,
         BuiltInType::UInt16 => DataType::UInt16,
         BuiltInType::Int32 => DataType::Int32,
@@ -430,17 +463,91 @@ fn datatype_from_builtin_type(ty: &BuiltInType) -> DataType {
 }
 
 fn resolve_complex_type<'a>(
+    scope: &MessageSpecification,
     complex_type: &ComplexType,
     dependencies: &'a [MessageSpecification],
-) -> Option<&'a MessageSpecification> {
-    dependencies.iter().find(|spec| match complex_type {
-        ComplexType::Absolute { package, name } => {
-            spec.name == format!("{package}/{name}") || spec.name == *name
+) -> anyhow::Result<&'a MessageSpecification> {
+    // Relative ROS message references are only allowed if message-package-local. Use the containing
+    // message's package to resolve e.g. a `Time stamp` field in a `pkg/msg/Msg` as `pkg/Time`.
+    // See also: <https://github.com/ros2/design/blob/gh-pages/articles/110_interface_definition.md>
+    let full_name = match complex_type {
+        ComplexType::Absolute { package, name } => format!("{package}/{name}"),
+        ComplexType::Relative { name } => match message_package(&scope.name) {
+            Some(package) => format!("{package}/{name}"),
+            None => name.clone(),
+        },
+    };
+
+    let spec = dependencies
+        .iter()
+        .find(|spec| spec.name == full_name)
+        .ok_or_else(|| match complex_type {
+            ComplexType::Absolute { .. } => anyhow::anyhow!("Could not resolve complex type `{full_name}`"),
+            ComplexType::Relative { name } => anyhow::anyhow!(
+                "Relative ROS type `{name}` must resolve within the containing message package as `{full_name}`, but no such message definition was found"
+            ),
+        })?;
+
+    Ok(spec)
+}
+
+/// True if any field (including inside arrays) is a `wstring`, which we can't decode.
+///
+/// Nested messages live in `dependencies` and are walked directly, so we don't recurse
+/// into `Type::Complex`.
+fn schema_uses_wstring(message_schema: &MessageSchema) -> bool {
+    fn type_uses_wstring(ty: &Type) -> bool {
+        match ty {
+            Type::BuiltIn(BuiltInType::WString(_)) => true,
+            Type::BuiltIn(_) | Type::Complex(_) => false,
+            Type::Array { ty, .. } => type_uses_wstring(ty),
         }
-        ComplexType::Relative { name } => {
-            spec.name == *name || spec.name.ends_with(&format!("/{name}"))
+    }
+
+    std::iter::chain(
+        std::iter::once(&message_schema.spec),
+        &message_schema.dependencies,
+    )
+    .flat_map(|spec| &spec.fields)
+    .any(|field| type_uses_wstring(&field.ty))
+}
+
+fn ensure_complex_field_types_resolve(message_schema: &MessageSchema) -> anyhow::Result<()> {
+    for spec in std::iter::chain(
+        std::iter::once(&message_schema.spec),
+        &message_schema.dependencies,
+    ) {
+        for field in &spec.fields {
+            ensure_field_type_resolves(spec, &field.name, &field.ty, &message_schema.dependencies)?;
         }
-    })
+    }
+
+    Ok(())
+}
+
+/// Recursively checks one field type for unresolved message references.
+fn ensure_field_type_resolves(
+    scope: &MessageSpecification,
+    field_name: &str,
+    field_type: &Type,
+    dependencies: &[MessageSpecification],
+) -> anyhow::Result<()> {
+    match field_type {
+        Type::Complex(complex_type) => {
+            resolve_complex_type(scope, complex_type, dependencies).map_err(|err| {
+                anyhow::anyhow!("ROS message field `{field_name}` has an unresolved type: {err}")
+            })?;
+        }
+        Type::Array {
+            ty: array_item_type,
+            ..
+        } => {
+            ensure_field_type_resolves(scope, field_name, array_item_type, dependencies)?;
+        }
+        Type::BuiltIn(_) => {}
+    }
+
+    Ok(())
 }
 
 /// Provides reflection-based conversion of ROS2-encoded MCAP messages.
@@ -459,10 +566,9 @@ impl MessageDecoder for McapRos2ReflectionDecoder {
 
     fn init(&mut self, summary: &mcap::Summary) -> Result<(), Error> {
         for channel in summary.channels.values() {
-            let schema = channel
-                .schema
-                .as_ref()
-                .ok_or(Error::NoSchema(channel.topic.clone()))?;
+            let Some(schema) = channel.schema.as_ref() else {
+                continue;
+            };
 
             if schema.encoding.as_str() != "ros2msg" {
                 continue;
@@ -476,6 +582,17 @@ impl MessageDecoder for McapRos2ReflectionDecoder {
                         source: err,
                     }
                 })?;
+
+            if schema_uses_wstring(&message_schema) {
+                // `wstring` is UTF-16 on the wire, so decoding it would corrupt the rest
+                // of the message. Leave it unregistered and let the channel fall back to
+                // the raw decoder.
+                re_log::warn_once!(
+                    "MCAP channel '{}' uses ROS 2 `wstring`, which reflection cannot decode. Keeping it as raw data.",
+                    channel.topic
+                );
+                continue;
+            }
 
             let found = self
                 .schemas_per_topic
@@ -491,6 +608,11 @@ impl MessageDecoder for McapRos2ReflectionDecoder {
         Ok(())
     }
 
+    /// Claims _any_ ROS 2 channel that is supported by reflection.
+    ///
+    /// Note: if semantic parsing is enabled, [`crate::decoders::DecoderRegistry::plan`]
+    /// takes care of selecting [`crate::decoders::ros2::McapRos2Decoder`] instead for
+    /// schemas supported by semantic parsing.
     fn supports_channel(&self, channel: &mcap::Channel<'_>) -> bool {
         let Some(schema) = channel.schema.as_ref() else {
             return false;
@@ -500,19 +622,12 @@ impl MessageDecoder for McapRos2ReflectionDecoder {
             return false;
         }
 
-        // Only support channels if the semantic decoder doesn't support them
         // First check if we have parsed the schema successfully
         if !self.schemas_per_topic.contains_key(&channel.topic) {
             return false;
         }
 
-        if !supports_ros2_cdr_channel(channel) {
-            return false;
-        }
-
-        // Check if the semantic decoder would handle this message type
-        let semantic_decoder = super::McapRos2Decoder::new();
-        !semantic_decoder.supports_channel(channel)
+        supports_ros2_cdr_channel(channel)
     }
 
     fn message_parser(
@@ -521,9 +636,16 @@ impl MessageDecoder for McapRos2ReflectionDecoder {
         num_rows: usize,
     ) -> Option<Box<dyn MessageParser>> {
         let message_schema = self.schemas_per_topic.get(&channel.topic)?;
-        Some(Box::new(
-            Ros2ReflectionMessageParser::new(num_rows, message_schema.clone()).ok()?,
-        ))
+        match Ros2ReflectionMessageParser::new(num_rows, message_schema.clone()) {
+            Ok(parser) => Some(Box::new(parser)),
+            Err(err) => {
+                re_log::error_once!(
+                    "Skipping MCAP ROS2 channel '{}' because its schema cannot be reflected: {err:#}",
+                    channel.topic
+                );
+                None
+            }
+        }
     }
 }
 
@@ -534,6 +656,31 @@ mod tests {
     use re_ros_msg::deserialize::Value;
 
     use super::*;
+
+    #[test]
+    fn detects_wstring_in_schema() {
+        let plain = MessageSchema::parse("test/Msg", "string s\nint32 n\n").unwrap();
+        assert!(!schema_uses_wstring(&plain));
+
+        let scalar = MessageSchema::parse("test/Msg", "wstring w\n").unwrap();
+        assert!(schema_uses_wstring(&scalar));
+
+        let array = MessageSchema::parse("test/Msg", "wstring[] w\n").unwrap();
+        assert!(schema_uses_wstring(&array));
+
+        let nested = MessageSchema::parse(
+            "test/Outer",
+            r#"
+test/Inner inner
+
+================================================================================
+MSG: test/Inner
+wstring w
+"#,
+        )
+        .unwrap();
+        assert!(schema_uses_wstring(&nested));
+    }
 
     fn enum_schema() -> MessageSchema {
         MessageSchema::parse(
@@ -577,8 +724,116 @@ int8 BAR=1
             .unwrap();
 
         assert_eq!(
-            datatype_from_type(&mode.ty, &schema.dependencies).unwrap(),
+            datatype_from_type(&schema.spec, &mode.ty, &schema.dependencies).unwrap(),
             DataType::Int8
         );
+    }
+
+    /// A `std_msgs/Header` stamp or a bare top-level stamp becomes nanoseconds; a message with
+    /// neither returns `None`.
+    #[test]
+    fn lifts_message_stamp_to_nanos() {
+        use std::collections::BTreeMap;
+
+        let stamp = || {
+            Value::Message(BTreeMap::from([
+                ("sec".to_owned(), Value::I32(2)),
+                ("nanosec".to_owned(), Value::U32(500_000_000)),
+            ]))
+        };
+
+        let header = Value::Message(BTreeMap::from([
+            ("stamp".to_owned(), stamp()),
+            ("frame_id".to_owned(), Value::String("base".to_owned())),
+        ]));
+        let with_header = BTreeMap::from([("header".to_owned(), header)]);
+        assert_eq!(message_stamp_nanos(&with_header), Some(2_500_000_000));
+
+        // `rcl_interfaces/Log`-shaped: a bare `builtin_interfaces/Time` stamp, no header.
+        let bare_stamp = BTreeMap::from([("stamp".to_owned(), stamp())]);
+        assert_eq!(message_stamp_nanos(&bare_stamp), Some(2_500_000_000));
+
+        let stampless = BTreeMap::from([("voltage".to_owned(), Value::F32(1.0))]);
+        assert_eq!(message_stamp_nanos(&stampless), None);
+    }
+
+    #[test]
+    fn relative_type_uses_containing_message_package() {
+        let schema = MessageSchema::parse(
+            "test/msg/Msg",
+            r#"
+Time start_measurement
+builtin_interfaces/Time stamp
+
+================================================================================
+MSG: test/Time
+uint32 sec
+uint32 nanosec
+
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"#,
+        )
+        .unwrap();
+
+        ensure_complex_field_types_resolve(&schema).unwrap();
+
+        let start_measurement = schema
+            .spec
+            .fields
+            .iter()
+            .find(|field| field.name == "start_measurement")
+            .unwrap();
+        let stamp = schema
+            .spec
+            .fields
+            .iter()
+            .find(|field| field.name == "stamp")
+            .unwrap();
+
+        assert_eq!(
+            datatype_from_type(&schema.spec, &start_measurement.ty, &schema.dependencies).unwrap(),
+            DataType::Struct(
+                vec![
+                    Field::new("sec", DataType::UInt32, true),
+                    Field::new("nanosec", DataType::UInt32, true),
+                ]
+                .into()
+            )
+        );
+        assert_eq!(
+            datatype_from_type(&schema.spec, &stamp.ty, &schema.dependencies).unwrap(),
+            DataType::Struct(
+                vec![
+                    Field::new("sec", DataType::Int32, true),
+                    Field::new("nanosec", DataType::UInt32, true),
+                ]
+                .into()
+            )
+        );
+    }
+
+    #[test]
+    fn relative_type_missing_from_containing_package_is_rejected() {
+        let schema = MessageSchema::parse(
+            "test/msg/Msg",
+            r#"
+Time start_measurement
+
+================================================================================
+MSG: other_pkg/Time
+uint32 sec
+uint32 nanosec
+"#,
+        )
+        .unwrap();
+
+        let err = ensure_complex_field_types_resolve(&schema).unwrap_err();
+        let err = err.to_string();
+
+        assert!(err.contains("start_measurement"));
+        assert!(err.contains("test/Time"));
     }
 }

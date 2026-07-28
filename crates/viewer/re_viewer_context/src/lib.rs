@@ -32,6 +32,7 @@ mod heuristics;
 mod image_info;
 mod item;
 mod item_collection;
+mod link_button;
 mod maybe_mut_ref;
 pub mod open_url;
 mod query_context;
@@ -72,13 +73,14 @@ pub use self::blueprint_id::{
     BlueprintId, BlueprintIdRegistry, ContainerId, GLOBAL_VIEW_ID, ViewId,
 };
 pub use self::cache::{
-    Cache, ImageDecodeCache, ImageStatsCache, Memoizers, SharablePlayableVideoStream, StoreCache,
-    TensorStatsCache, TransformDatabaseStoreCache, VideoAssetCache, VideoStreamCache,
-    VideoStreamProcessingError,
+    AppCaches, Cache, CacheEntryAccess, EncodedDepthImageStatsCache, ImageDecodeCache,
+    ImageHistogramCache, ImageStatsCache, Memoizers, Rgb8Histogram, SharablePlayableVideoStream,
+    StoreCache, TensorStatsAccessor, TensorStatsCache, TransformDatabaseStoreCache,
+    VideoAssetCache, VideoStoreSource, VideoStreamCache, VideoStreamProcessingError,
 };
 pub use self::collapsed_id::{CollapseItem, CollapseScope, CollapsedId};
 pub use self::command_sender::{
-    CommandReceiver, CommandSender, EditRedapServerModalCommand, SystemCommand,
+    CommandReceiver, CommandSender, DownloadAction, EditRedapServerModalCommand, SystemCommand,
     SystemCommandSender, command_channel,
 };
 pub use self::component_fallbacks::{
@@ -100,6 +102,9 @@ pub use self::item::{
     resolve_mono_instance_path_item,
 };
 pub use self::item_collection::{ItemCollection, ItemContext};
+pub use self::link_button::{
+    LinkKind, ResolvedEntry, UrlNameLookup, make_url_decorator, segment_button_atoms, url_atoms,
+};
 pub use self::maybe_mut_ref::MaybeMutRef;
 pub use self::query_context::{
     DataQueryResult, DataResultHandle, DataResultNode, DataResultTree, QueryContext,
@@ -118,7 +123,8 @@ pub use self::tables::{TableStore, TableStores};
 pub use self::tensor::{ImageStats, TensorStats};
 pub use self::time_control::{
     MoveDirection, MoveSpeed, TIME_PANEL_PATH, TimeControl, TimeControlCommand,
-    TimeControlResponse, TimeControlUpdateParams, TimeView, time_panel_blueprint_entity_path,
+    TimeControlResponse, TimeControlUpdateParams, TimeRangeHighlight, TimeRangeHighlightKind,
+    TimeView, time_panel_blueprint_entity_path,
 };
 pub use self::typed_entity_collections::{
     BufferAndFormatMatch, DatatypeMatch, IndicatedEntities, PerVisualizerInstruction,
@@ -132,7 +138,7 @@ pub use self::utils::{
 };
 pub use self::view::{
     BufferAndFormatConstraint, DataResult, IdentifiedViewSystem, OptionalViewEntityHighlight,
-    PerSystemEntities, RecommendedMappings, RecommendedView, RecommendedVisualizers,
+    PerSystemEntities, PreviewState, RecommendedMappings, RecommendedView, RecommendedVisualizers,
     SingleRequiredComponentConstraint, SystemExecutionOutput, ViewClass, ViewClassExt,
     ViewClassLayoutPriority, ViewClassPlaceholder, ViewClassRegistry, ViewClassRegistryError,
     ViewContext, ViewContextCollection, ViewContextSystem, ViewContextSystemOncePerFrameResult,
@@ -150,10 +156,14 @@ pub use self::visitor_flow_control::VisitorControlFlow; // Historical reasons
 pub mod external {
     #[cfg(not(target_arch = "wasm32"))]
     pub use tokio;
-    pub use {nohash_hasher, re_chunk_store, re_entity_db, re_log_types, re_query, re_ui};
+    pub use {
+        nohash_hasher, re_chunk_store, re_entity_db, re_log_types, re_query, re_string_interner,
+        re_tf, re_ui,
+    };
 }
 
 // Re-export
+pub use re_byte_size::SizeBytes;
 pub use re_chunk_store::MissingChunkReporter;
 
 // ---------------------------------------------------------------------------
@@ -162,6 +172,16 @@ pub use re_chunk_store::MissingChunkReporter;
 pub enum NeedsRepaint {
     Yes,
     No,
+}
+
+impl NeedsRepaint {
+    pub fn or(self, other: Self) -> Self {
+        if self == Self::Yes || other == Self::Yes {
+            Self::Yes
+        } else {
+            Self::No
+        }
+    }
 }
 
 // ---
@@ -199,6 +219,9 @@ pub struct ScreenshotInfo {
 
     /// Where to put the screenshot.
     pub target: ScreenshotTarget,
+
+    /// Whether to show a user-facing notification (info toast) when the screenshot is done.
+    pub notify: bool,
 }
 
 /// Where to put the screenshot.

@@ -310,7 +310,7 @@ impl ListItem {
     ///
     /// *Important*: must be called while nested in a [`super::list_item_scope`].
     pub fn show_flat<'a>(self, ui: &mut Ui, content: impl ListItemContent + 'a) -> Response {
-        // Note: the purpose of the scope is to minimise interferences on subsequent items' id
+        // Note: the purpose of the scope is to minimize interferences on subsequent items' id
         ui.sanity_check();
         ui.scope(|ui| self.ui(ui, None, 0.0, Box::new(content)))
             .inner
@@ -321,7 +321,7 @@ impl ListItem {
     ///
     /// *Important*: must be called while nested in a [`super::list_item_scope`].
     pub fn show_hierarchical(self, ui: &mut Ui, content: impl ListItemContent) -> Response {
-        // Note: the purpose of the scope is to minimise interferences on subsequent items' id
+        // Note: the purpose of the scope is to minimize interferences on subsequent items' id
         ui.scope(|ui| {
             let tokens = ui.tokens();
             self.ui(
@@ -396,7 +396,7 @@ impl ListItem {
         let openness = state.openness(ui.ctx());
         self.collapse_openness = Some(openness);
 
-        // Note: the purpose of the scope is to minimise interferences on subsequent items' id
+        // Note: the purpose of the scope is to minimize interferences on subsequent items' id
         let response = ui
             .scope(|ui| self.ui(ui, Some(id), 0.0, Box::new(content)))
             .inner;
@@ -571,7 +571,12 @@ impl ListItem {
             style_response.flags |= egui::response::Flags::HOVERED;
         }
 
-        let hovered = (style_response.hovered() || style_response.contains_pointer())
+        // `contains_pointer` is needed in addition to `hovered` so the highlight doesn't
+        // flicker off while the user is pressing one of the item's buttons. Unlike `hovered`
+        // though, it stays true while some *other* widget (e.g. a panel resize handle) is
+        // being dragged past us, so we must exclude that case ourselves.
+        let hovered = (style_response.hovered()
+            || (style_response.contains_pointer() && ui.ctx().dragged_id().is_none()))
             && interactive
             && !drag_target
             && !egui::DragAndDrop::has_any_payload(ui.ctx());

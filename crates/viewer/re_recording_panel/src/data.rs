@@ -14,7 +14,7 @@ use re_redap_browser::{Entries, EntryInner, RedapServers};
 use re_sdk_types::archetypes::RecordingInfo;
 use re_sdk_types::components::{Name, Timestamp};
 use re_uri::{DATASET_HIERARCHY_SEPARATOR, split_dataset_hierarchy_path};
-use re_viewer_context::{Item, Route, ViewerContext};
+use re_viewer_context::{AppContext, Item, Route};
 
 /// Short-lived structure containing all the data that will be displayed in the recording panel.
 #[derive(Debug)]
@@ -41,7 +41,7 @@ pub struct RecordingPanelData<'a> {
 }
 
 impl<'a> RecordingPanelData<'a> {
-    pub fn new(ctx: &'a ViewerContext<'a>, servers: &'a RedapServers, hide_examples: bool) -> Self {
+    pub fn new(ctx: &'a AppContext<'a>, servers: &'a RedapServers, hide_examples: bool) -> Self {
         re_tracing::profile_function!();
 
         //
@@ -133,7 +133,7 @@ impl<'a> RecordingPanelData<'a> {
             .collect();
 
         let show_example_section = ctx
-            .app_options()
+            .app_options
             .include_rerun_examples_button_in_recordings_panel
             && !hide_examples
             || !example_apps.is_empty();
@@ -173,7 +173,7 @@ impl<'a> RecordingPanelData<'a> {
             }
         }
 
-        for local_app in self.local_apps.iter().chain(self.example_apps.iter()) {
+        for local_app in std::iter::chain(&self.local_apps, &self.example_apps) {
             let store_iter = local_app.iter_loaded_stores();
 
             if let Some(pos) = store_iter.clone().position(|db| db.store_id() == store_id) {
@@ -199,7 +199,7 @@ pub struct AppIdData<'a> {
 
 impl<'a> AppIdData<'a> {
     fn new(
-        ctx: &'a ViewerContext<'a>,
+        ctx: &'a AppContext<'a>,
         app_id: ApplicationId,
         mut entity_dbs: Vec<&'a EntityDb>,
     ) -> Self {
@@ -269,12 +269,17 @@ pub struct ServerData<'a> {
     /// What is selected is a subset of this thing
     pub is_active: bool,
 
+    // TODO(RR-5031): Depending on how much customizations we need to do,
+    // we should consider moving this out of here and creating a dedicated
+    // `InternalCatalogData` struct that mirrors `ServerData`.
+    pub is_internal: bool,
+
     pub entries_data: ServerEntriesData<'a>,
 }
 
 impl<'a> ServerData<'a> {
     fn new(
-        ctx: &'a ViewerContext<'_>,
+        ctx: &'a AppContext<'_>,
         server: &re_redap_browser::Server,
         loading_segments: Option<&HashMap<EntryId, Vec<Arc<LogSource>>>>,
     ) -> Self {
@@ -294,6 +299,7 @@ impl<'a> ServerData<'a> {
             origin: origin.clone(),
             is_active,
             is_selected,
+            is_internal: server.is_internal(),
             entries_data,
         }
     }
@@ -322,7 +328,7 @@ pub enum ServerEntriesData<'a> {
 
 impl<'a> ServerEntriesData<'a> {
     fn new(
-        ctx: &'a ViewerContext<'a>,
+        ctx: &'a AppContext<'a>,
         entries: &Entries,
         origin: &re_uri::Origin,
         loading_segments: Option<&HashMap<EntryId, Vec<Arc<LogSource>>>>,

@@ -8,7 +8,7 @@ use re_sdk_types::{Archetype, Component};
 use re_viewer_context::ViewContext;
 use re_viewport_blueprint::{ViewProperty, ViewPropertyQueryError};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, re_byte_size::SizeBytes)]
 pub struct ForceLayoutParams {
     // Link
     pub(super) force_link_enabled: Enabled,
@@ -39,11 +39,7 @@ struct QueryArchetype<'a, T> {
 
 impl<'a, T: Archetype> QueryArchetype<'a, T> {
     fn new(ctx: &'a ViewContext<'a>) -> Self {
-        let property = ViewProperty::from_archetype::<T>(
-            ctx.viewer_ctx.blueprint_db(),
-            ctx.blueprint_query(),
-            ctx.view_id,
-        );
+        let property = ViewProperty::from_archetype::<T>(ctx);
         Self {
             ctx,
             property,

@@ -1,14 +1,16 @@
 use std::collections::BTreeMap;
 
-use itertools::Either;
 use nohash_hasher::IntSet;
 
 use re_chunk::{ComponentIdentifier, TimelineName};
 use re_chunk_store::LatestAtQuery;
 use re_entity_db::{EntityPath, TimeInt};
-use re_sdk_types::blueprint::archetypes::{self as blueprint_archetypes, EntityBehavior};
 use re_sdk_types::blueprint::components::VisualizerInstructionId;
 use re_sdk_types::blueprint::datatypes::{ComponentSourceKind, VisualizerComponentMapping};
+use re_sdk_types::{
+    InvalidComponentIdentifierError,
+    blueprint::archetypes::{self as blueprint_archetypes, EntityBehavior},
+};
 
 use crate::blueprint_helpers::BlueprintContext as _;
 use crate::{
@@ -32,7 +34,10 @@ pub enum VisualizerComponentSource {
 }
 
 impl VisualizerComponentSource {
-    pub fn from_blueprint_mapping(mapping: &VisualizerComponentMapping) -> Self {
+    /// Convert a [`VisualizerComponentMapping`] into a `VisualizerComponentSource`.
+    pub fn from_blueprint_mapping(
+        mapping: &VisualizerComponentMapping,
+    ) -> Result<Self, InvalidComponentIdentifierError> {
         let VisualizerComponentMapping {
             target,
             source_kind,
@@ -40,20 +45,22 @@ impl VisualizerComponentSource {
             selector,
         } = mapping;
 
-        match source_kind {
-            ComponentSourceKind::SourceComponent => Self::SourceComponent {
-                source_component: source_component
+        Ok(match source_kind {
+            ComponentSourceKind::SourceComponent => {
+                let source_component = source_component
                     .as_ref()
                     .map(|c| c.as_str())
-                    .unwrap_or_else(|| target.as_str())
-                    .into(),
-                selector: selector.as_ref().map_or(String::new(), |s| s.to_string()),
-            },
+                    .unwrap_or_else(|| target.as_str());
+                Self::SourceComponent {
+                    source_component: ComponentIdentifier::try_new(source_component)?,
+                    selector: selector.as_ref().map_or(String::new(), |s| s.to_string()),
+                }
+            }
 
             ComponentSourceKind::Override => Self::Override,
 
             ComponentSourceKind::Default => Self::Default,
-        }
+        })
     }
 
     pub fn source_kind(&self) -> ComponentSourceKind {
@@ -110,6 +117,11 @@ impl RecommendedMappings {
         }
     }
 
+    /// Creates a recommendation from a set of mandatory mappings.
+    pub fn from_mappings(mandatory_mappings: VisualizerComponentMappings) -> Self {
+        Self { mandatory_mappings }
+    }
+
     /// Returns `true` if all mandatory mappings in this recommendation are already
     /// satisfied by the given existing component mappings.
     pub fn is_covered_by(&self, existing_mappings: &VisualizerComponentMappings) -> bool {
@@ -151,6 +163,11 @@ impl RecommendedMappings {
     /// Returns the underlying component mappings.
     pub fn into_mappings(self) -> VisualizerComponentMappings {
         self.mandatory_mappings
+    }
+
+    /// Returns the underlying component mappings.
+    pub fn mappings(&self) -> &VisualizerComponentMappings {
+        &self.mandatory_mappings
     }
 
     /// Human-readable display name derived from the first component source.
@@ -492,14 +509,11 @@ impl<'s> ViewQuery<'s> {
         &self,
         visualizer: ViewSystemIdentifier,
     ) -> impl Iterator<Item = (&'s DataResult, &'s VisualizerInstruction)> {
-        if let Some(instructions) = self
-            .active_visualizer_instructions_per_type
+        self.active_visualizer_instructions_per_type
             .get(&visualizer)
-        {
-            Either::Left(instructions.iter().copied())
-        } else {
-            Either::Right(std::iter::empty())
-        }
+            .into_iter()
+            .flatten()
+            .copied()
     }
 
     #[inline]

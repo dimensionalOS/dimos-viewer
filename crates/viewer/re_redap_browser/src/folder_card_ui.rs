@@ -89,7 +89,8 @@ pub fn folder_cards_ui(
                             let (icon, tooltip) = match kind {
                                 EntryKind::Dataset
                                 | EntryKind::DatasetView
-                                | EntryKind::BlueprintDataset => (&icons::DATASET, "Dataset"),
+                                | EntryKind::BlueprintDataset
+                                | EntryKind::AssetDataset => (&icons::DATASET, "Dataset"),
                                 EntryKind::Table | EntryKind::TableView => (&icons::TABLE, "Table"),
                                 EntryKind::Unspecified => (&icons::VIEW_UNKNOWN, "Entry"),
                             };
@@ -160,5 +161,5 @@ fn collect_cards(
         }
     }
 
-    subfolders.into_values().chain(direct_entries).collect()
+    std::iter::chain(subfolders.into_values(), direct_entries).collect()
 }

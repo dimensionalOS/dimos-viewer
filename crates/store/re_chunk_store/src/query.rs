@@ -30,11 +30,11 @@ impl ChunkStore {
     /// Retrieve all [`EntityPath`]s in the store.
     #[inline]
     pub fn all_entities(&self) -> IntSet<EntityPath> {
-        self.static_chunk_ids_per_entity
-            .keys()
-            .cloned()
-            .chain(self.temporal_chunk_ids_per_entity.keys().cloned())
-            .collect()
+        std::iter::chain(
+            self.static_chunk_ids_per_entity.keys().cloned(),
+            self.temporal_chunk_ids_per_entity.keys().cloned(),
+        )
+        .collect()
     }
 
     /// Returns a vector with all the chunks in this store, sorted in descending order relative to
@@ -110,55 +110,51 @@ impl ChunkStore {
     /// Retrieve all [`EntityPath`]s in the store.
     #[inline]
     pub fn all_entities_sorted(&self) -> BTreeSet<EntityPath> {
-        self.static_chunk_ids_per_entity
-            .keys()
-            .cloned()
-            .chain(self.temporal_chunk_ids_per_entity.keys().cloned())
-            .collect()
+        std::iter::chain(
+            self.static_chunk_ids_per_entity.keys().cloned(),
+            self.temporal_chunk_ids_per_entity.keys().cloned(),
+        )
+        .collect()
     }
 
     /// Retrieve all [`ComponentIdentifier`]s in the store.
     ///
     /// See also [`Self::all_components_sorted`].
     pub fn all_components(&self) -> UnorderedComponentSet {
-        self.static_chunk_ids_per_entity
-            .values()
-            .flat_map(|static_chunks_per_component| static_chunks_per_component.keys())
-            .chain(
-                self.temporal_chunk_ids_per_entity_per_component
-                    .values()
-                    .flat_map(|temporal_chunk_ids_per_timeline| {
-                        temporal_chunk_ids_per_timeline.values().flat_map(
-                            |temporal_chunk_ids_per_component| {
-                                temporal_chunk_ids_per_component.keys()
-                            },
-                        )
-                    }),
-            )
-            .copied()
-            .collect()
+        std::iter::chain(
+            self.static_chunk_ids_per_entity
+                .values()
+                .flat_map(|static_chunks_per_component| static_chunks_per_component.keys()),
+            self.temporal_chunk_ids_per_entity_per_component
+                .values()
+                .flat_map(|temporal_chunk_ids_per_timeline| {
+                    temporal_chunk_ids_per_timeline.values().flat_map(
+                        |temporal_chunk_ids_per_component| temporal_chunk_ids_per_component.keys(),
+                    )
+                }),
+        )
+        .copied()
+        .collect()
     }
 
     /// Retrieve all [`ComponentIdentifier`]s in the store.
     ///
     /// See also [`Self::all_components`].
     pub fn all_components_sorted(&self) -> ComponentSet {
-        self.static_chunk_ids_per_entity
-            .values()
-            .flat_map(|static_chunks_per_component| static_chunks_per_component.keys())
-            .chain(
-                self.temporal_chunk_ids_per_entity_per_component
-                    .values()
-                    .flat_map(|temporal_chunk_ids_per_timeline| {
-                        temporal_chunk_ids_per_timeline.values().flat_map(
-                            |temporal_chunk_ids_per_component| {
-                                temporal_chunk_ids_per_component.keys()
-                            },
-                        )
-                    }),
-            )
-            .copied()
-            .collect()
+        std::iter::chain(
+            self.static_chunk_ids_per_entity
+                .values()
+                .flat_map(|static_chunks_per_component| static_chunks_per_component.keys()),
+            self.temporal_chunk_ids_per_entity_per_component
+                .values()
+                .flat_map(|temporal_chunk_ids_per_timeline| {
+                    temporal_chunk_ids_per_timeline.values().flat_map(
+                        |temporal_chunk_ids_per_component| temporal_chunk_ids_per_component.keys(),
+                    )
+                }),
+        )
+        .copied()
+        .collect()
     }
 
     /// Retrieve all the [`ComponentIdentifier`]s that have been written to for a given [`EntityPath`] on
@@ -166,10 +162,12 @@ impl ChunkStore {
     ///
     /// Static components are always included in the results.
     ///
+    /// A `None` timeline (a static-only query) yields only the static components.
+    ///
     /// Returns `None` if the entity doesn't exist at all on this `timeline`.
     pub fn all_components_on_timeline(
         &self,
-        timeline: &TimelineName,
+        timeline: Option<&TimelineName>,
         entity_path: &EntityPath,
     ) -> Option<UnorderedComponentSet> {
         re_tracing::profile_function!();
@@ -189,8 +187,8 @@ impl ChunkStore {
             .temporal_chunk_ids_per_entity_per_component
             .get(entity_path)
             .map(|temporal_chunk_ids_per_timeline| {
-                temporal_chunk_ids_per_timeline
-                    .get(timeline)
+                timeline
+                    .and_then(|timeline| temporal_chunk_ids_per_timeline.get(timeline))
                     .map(|temporal_chunk_ids_per_component| {
                         temporal_chunk_ids_per_component
                             .keys()
@@ -205,7 +203,7 @@ impl ChunkStore {
             (None, None) => None,
             (None, Some(comps)) | (Some(comps), None) => Some(comps),
             (Some(static_comps), Some(temporal_comps)) => {
-                Some(static_comps.into_iter().chain(temporal_comps).collect())
+                Some(std::iter::chain(static_comps, temporal_comps).collect())
             }
         }
     }
@@ -254,7 +252,7 @@ impl ChunkStore {
             (None, None) => None,
             (None, Some(comps)) | (Some(comps), None) => Some(comps),
             (Some(static_comps), Some(temporal_comps)) => {
-                Some(static_comps.into_iter().chain(temporal_comps).collect())
+                Some(std::iter::chain(static_comps, temporal_comps).collect())
             }
         }
     }
@@ -265,14 +263,16 @@ impl ChunkStore {
     #[inline]
     pub fn entity_has_component_on_timeline(
         &self,
-        timeline: &TimelineName,
+        timeline: Option<&TimelineName>,
         entity_path: &EntityPath,
         component: ComponentIdentifier,
     ) -> bool {
         // re_tracing::profile_function!(); // This function is too fast; profiling will only add overhead
 
         self.entity_has_static_component(entity_path, component)
-            || self.entity_has_temporal_component_on_timeline(timeline, entity_path, component)
+            || timeline.is_some_and(|timeline| {
+                self.entity_has_temporal_component_on_timeline(timeline, entity_path, component)
+            })
     }
 
     /// Check whether an entity has a static component or a temporal component on any timeline.
@@ -747,7 +747,7 @@ impl QueryResults {
             } else {
                 match report_mode {
                     ChunkTrackingMode::Ignore => {}
-                    ChunkTrackingMode::Report => {
+                    ChunkTrackingMode::Report | ChunkTrackingMode::ReportTransient => {
                         this.missing_virtual.push(chunk_id);
                     }
                     ChunkTrackingMode::PanicOnMissing => {
@@ -757,7 +757,9 @@ impl QueryResults {
             }
         }
 
-        if report_mode == ChunkTrackingMode::Report {
+        if report_mode == ChunkTrackingMode::Report
+            || report_mode == ChunkTrackingMode::ReportTransient
+        {
             let mut tracker = store.queried_chunk_id_tracker.write();
 
             for chunk_id in &this.missing_virtual {
@@ -777,21 +779,31 @@ impl QueryResults {
                 }
             }
 
-            tracker
-                .missing_virtual
-                .extend(this.missing_virtual.iter().copied());
+            if report_mode == ChunkTrackingMode::Report {
+                tracker
+                    .missing_virtual
+                    .extend(this.missing_virtual.iter().copied());
 
-            tracker
-                .used_physical
-                .extend(this.chunks.iter().map(|c| c.id()));
+                tracker
+                    .used_physical
+                    .extend(this.chunks.iter().map(|c| c.id()));
+            } else {
+                tracker
+                    .transient_missing_virtual
+                    .extend(this.missing_virtual.iter().copied());
+
+                tracker
+                    .transient_used_physical
+                    .extend(this.chunks.iter().map(|c| c.id()));
+            }
         }
 
         debug_assert!(
-            this.chunks
-                .iter()
-                .map(|chunk| chunk.id())
-                .chain(this.missing_virtual.iter().copied())
-                .all_unique()
+            std::iter::chain(
+                this.chunks.iter().map(|chunk| chunk.id()),
+                this.missing_virtual.iter().copied(),
+            )
+            .all_unique()
         );
 
         this
@@ -908,7 +920,8 @@ impl ChunkStore {
             .temporal_chunk_ids_per_entity_per_component
             .get(entity_path)
             .and_then(|temporal_chunk_ids_per_timeline| {
-                temporal_chunk_ids_per_timeline.get(&query.timeline())
+                let timeline = query.timeline()?;
+                temporal_chunk_ids_per_timeline.get(&timeline)
             })
             .and_then(|temporal_chunk_ids_per_component| {
                 temporal_chunk_ids_per_component.get(&component)
@@ -959,7 +972,8 @@ impl ChunkStore {
                 .temporal_chunk_ids_per_entity_per_component
                 .get(entity_path)
                 .and_then(|temporal_chunk_ids_per_timeline_per_component| {
-                    temporal_chunk_ids_per_timeline_per_component.get(&query.timeline())
+                    let timeline = query.timeline()?;
+                    temporal_chunk_ids_per_timeline_per_component.get(&timeline)
                 })
                 .map(|temporal_chunk_ids_per_component| {
                     temporal_chunk_ids_per_component
@@ -976,11 +990,10 @@ impl ChunkStore {
                 })
                 .flatten();
 
-            static_chunk_ids
-                .chain(temporal_chunk_ids)
-                // Deduplicate before passing it along.
-                // Both temporal and static chunk "sets" here may have duplicates in them,
-                // so we de-duplicate them together to reduce the number of allocations.
+            // Deduplicate before passing it along.
+            // Both temporal and static chunk "sets" here may have duplicates in them,
+            // so we de-duplicate them together to reduce the number of allocations.
+            std::iter::chain(static_chunk_ids, temporal_chunk_ids)
                 .unique()
                 .collect_vec()
         } else {
@@ -988,7 +1001,8 @@ impl ChunkStore {
             self.temporal_chunk_ids_per_entity
                 .get(entity_path)
                 .and_then(|temporal_chunk_ids_per_timeline| {
-                    temporal_chunk_ids_per_timeline.get(&query.timeline())
+                    let timeline = query.timeline()?;
+                    temporal_chunk_ids_per_timeline.get(&timeline)
                 })
                 .and_then(|temporal_chunk_ids_per_time| {
                     Self::latest_at(query, temporal_chunk_ids_per_time)
@@ -1169,14 +1183,10 @@ impl ChunkStore {
             )
             .into_iter();
 
-            Either::Left(
-                static_chunk_ids
-                    .chain(temporal_chunk_ids)
-                    // Deduplicate before passing it along.
-                    // Both temporal and static chunk "sets" here may have duplicates in them,
-                    // so we de-duplicate them together to reduce the number of allocations.
-                    .unique(),
-            )
+            // Deduplicate before passing it along.
+            // Both temporal and static chunk "sets" here may have duplicates in them,
+            // so we de-duplicate them together to reduce the number of allocations.
+            Either::Left(std::iter::chain(static_chunk_ids, temporal_chunk_ids).unique())
         } else {
             // This cannot yield duplicates by definition.
             Either::Right(Self::range(
@@ -1306,10 +1316,9 @@ mod tests {
     // Make sure queries yield partial results when we expect them to.
     #[test]
     fn partial_data_basics() {
-        let mut store = ChunkStore::new(
-            re_log_types::StoreId::random(re_log_types::StoreKind::Recording, "test_app"),
-            crate::ChunkStoreConfig::ALL_DISABLED,
-        );
+        let store_id =
+            re_log_types::StoreId::random(re_log_types::StoreKind::Recording, "test_app");
+        let mut store = ChunkStore::new(store_id.clone(), crate::ChunkStoreConfig::ALL_DISABLED);
 
         let entity_path: EntityPath = "some_entity".into();
 
@@ -1363,6 +1372,16 @@ mod tests {
 
             assert!(store.take_tracked_chunk_ids().missing_virtual.is_empty());
         }
+
+        // Back the chunks with an RRD manifest. That way, once they get garbage collected, they
+        // stay recoverable and keep being reported as missing (partial results) instead of
+        // vanishing from the virtual indices entirely.
+        let rrd_manifest = re_log_encoding::RrdManifest::build_in_memory_from_chunks(
+            store_id,
+            [&*chunk1, &*chunk2, &*chunk3].into_iter(),
+        )
+        .unwrap();
+        _ = store.insert_rrd_manifest(rrd_manifest);
 
         store.insert_chunk(&chunk1).unwrap();
         store.insert_chunk(&chunk2).unwrap();

@@ -6,7 +6,7 @@ use re_sdk_types::components::{
     CellSize, Colormap, ImageBuffer, ImageFormat, Opacity, RotationAxisAngle, RotationQuat,
     Translation3D,
 };
-use re_sdk_types::datatypes::{ColorModel, Quaternion};
+use re_sdk_types::datatypes::ColorModel;
 use re_sdk_types::image::ImageKind;
 use re_sdk_types::reflection::Enum as _;
 use re_viewer_context::{
@@ -19,7 +19,7 @@ use re_viewer_context::{
 use super::SpatialViewVisualizerData;
 use super::entity_iterator::process_archetype;
 use crate::contexts::SpatialSceneVisualizerInstructionContext;
-use crate::{PickableRectSourceData, PickableTexturedRect};
+use crate::{PickableRectSourceData, PickableTexturedRect, SpaceKind};
 
 #[derive(Default)]
 pub struct GridMapVisualizer;
@@ -45,12 +45,15 @@ struct GridMapComponentData {
     rotation_axis_angle: Option<RotationAxisAngle>,
     quaternion: Option<RotationQuat>,
     opacity: Option<Opacity>,
-    colormap: Option<Colormap>,
+    colormap: Colormap,
 }
 
 impl IdentifiedViewSystem for GridMapVisualizer {
     fn identifier() -> re_viewer_context::ViewSystemIdentifier {
-        "GridMap".into()
+        re_viewer_context::external::re_string_interner::intern_static!(
+            re_viewer_context::ViewSystemIdentifier,
+            "GridMap"
+        )
     }
 }
 
@@ -177,7 +180,10 @@ impl GridMapVisualizer {
                     opacity: opacities.and_then(|o| o.first().copied()).map(Into::into),
                     colormap: colormaps
                         .and_then(|c| c.first().copied())
-                        .and_then(Colormap::try_from_integer),
+                        .and_then(Colormap::try_from_integer)
+                        .unwrap_or_else(|| {
+                            typed_fallback_for(ctx, GridMap::descriptor_colormap().component)
+                        }),
                 })
             },
         );
@@ -192,7 +198,7 @@ impl GridMapVisualizer {
                 component_data,
                 &color_mode,
             ) {
-                data.add_bounding_box(
+                data.add_bounding_box_3d(
                     entity_path.hash(),
                     textured_rect.bounding_box(),
                     glam::Affine3A::IDENTITY,
@@ -206,7 +212,7 @@ impl GridMapVisualizer {
                             depth_meter: None,
                         },
                     },
-                    spatial_ctx.view_class_identifier,
+                    SpaceKind::ThreeD, // The bounding box is flat, but this is distinctively a 3D object in a 3D space!
                 );
             }
         }
@@ -240,11 +246,9 @@ impl GridMapVisualizer {
             return None;
         }
 
-        let image_stats = ctx
-            .viewer_ctx()
-            .store_context
-            .caches
-            .memoizer(|c: &mut re_viewer_context::ImageStatsCache| c.entry(&image));
+        let caches = ctx.viewer_ctx().store_context.caches;
+        let image_stats =
+            caches.memoizer_read_or_compute::<re_viewer_context::ImageStatsCache, _, _>(&image);
 
         let colormapped_texture = match gpu_bridge::image_to_gpu(
             ctx.viewer_ctx().render_ctx(),
@@ -270,67 +274,17 @@ impl GridMapVisualizer {
             .single_transform_required_for_entity(entity_path, GridMap::name())
             .as_affine3a();
 
-        let translation = if let Some(translation) = translation {
-            translation.into()
-        } else {
-            glam::Affine3A::IDENTITY
-        };
-
-        let rotation = match (quaternion, rotation_axis_angle) {
-            (Some(quaternion), Some(rotation_axis_angle))
-                if quaternion.0 != Quaternion::IDENTITY
-                    && rotation_axis_angle != RotationAxisAngle::IDENTITY =>
-            {
-                // Match the behavior documented in the archetype definition:
-                // if both are set, the quaternion takes precedence.
-                results.report_for_component(
-                    GridMap::descriptor_quaternion().component,
-                    VisualizerReportSeverity::Warning,
-                    format!(
-                        "GridMap {entity_path} has both quaternion and rotation_axis_angle set; using quaternion."
-                    ),
-                );
-
-                if let Ok(rotation) = glam::Affine3A::try_from(quaternion) {
-                    rotation
-                } else {
-                    results.report_for_component(
-                        GridMap::descriptor_quaternion().component,
-                        VisualizerReportSeverity::Error,
-                        "invalid rotation quaternion",
-                    );
-                    return None;
-                }
-            }
-            (Some(quaternion), _) => {
-                if let Ok(rotation) = glam::Affine3A::try_from(quaternion) {
-                    rotation
-                } else {
-                    results.report_for_component(
-                        GridMap::descriptor_quaternion().component,
-                        VisualizerReportSeverity::Error,
-                        "invalid rotation quaternion",
-                    );
-                    return None;
-                }
-            }
-            (_, Some(rotation_axis_angle)) => {
-                if let Ok(rotation) = glam::Affine3A::try_from(rotation_axis_angle) {
-                    rotation
-                } else {
-                    results.report_for_component(
-                        GridMap::descriptor_rotation_axis_angle().component,
-                        VisualizerReportSeverity::Error,
-                        "invalid rotation axis-angle",
-                    );
-                    return None;
-                }
-            }
-            (None, None) => glam::Affine3A::IDENTITY,
-        };
-
-        let grid_from_entity = translation * rotation;
-        let world_from_grid = world_from_entity * grid_from_entity;
+        let entity_from_grid = super::entity_from_grid_transform(
+            results,
+            entity_path,
+            "GridMap",
+            translation,
+            rotation_axis_angle,
+            quaternion,
+            GridMap::descriptor_quaternion().component,
+            GridMap::descriptor_rotation_axis_angle().component,
+        )?;
+        let world_from_grid = world_from_entity * entity_from_grid;
 
         let [width, height] = image.width_height_f32();
         let extent_u = world_from_grid.transform_vector3(Vec3::X * width * cell_size);
@@ -375,14 +329,10 @@ impl GridMapVisualizer {
         results: &re_view::VisualizerInstructionQueryResults<'_>,
         component_data: &GridMapComponentData,
     ) -> GridMapColorMode {
-        let Some(colormap) = component_data.colormap else {
-            return GridMapColorMode::NoColormap;
-        };
-
         if component_data.image.format.color_model() != ColorModel::L {
             results.report_for_component(
                 GridMap::descriptor_colormap().component,
-                VisualizerReportSeverity::Warning,
+                VisualizerReportSeverity::Info,
                 format!(
                     "GridMap colormaps only apply to single-channel images; ignoring colormap for {:?} data.",
                     component_data.image.format.color_model()
@@ -391,12 +341,13 @@ impl GridMapVisualizer {
             return GridMapColorMode::NoColormap;
         }
 
-        if matches!(colormap, Colormap::RvizMap | Colormap::RvizCostmap)
-            && !matches!(
-                component_data.image.format.datatype(),
-                re_sdk_types::datatypes::ChannelDatatype::U8
-            )
-        {
+        if matches!(
+            component_data.colormap,
+            Colormap::RvizMap | Colormap::RvizCostmap
+        ) && !matches!(
+            component_data.image.format.datatype(),
+            re_sdk_types::datatypes::ChannelDatatype::U8
+        ) {
             results.report_for_component(
                 GridMap::descriptor_colormap().component,
                 VisualizerReportSeverity::Warning,
@@ -408,12 +359,16 @@ impl GridMapVisualizer {
             return GridMapColorMode::NoColormap;
         }
 
-        let image_stats =
-            ctx.viewer_ctx().store_context.caches.memoizer(
-                |c: &mut re_viewer_context::ImageStatsCache| c.entry(&component_data.image),
+        let caches = ctx.viewer_ctx().store_context.caches;
+        let image_stats = caches
+            .memoizer_read_or_compute::<re_viewer_context::ImageStatsCache, _, _>(
+                &component_data.image,
             );
 
-        let value_range = if matches!(colormap, Colormap::RvizMap | Colormap::RvizCostmap) {
+        let value_range = if matches!(
+            component_data.colormap,
+            Colormap::RvizMap | Colormap::RvizCostmap
+        ) {
             // RViz grid-map colormaps are discrete mappings for u8 values, not continuous gradients.
             [0.0, 255.0]
         } else {
@@ -424,7 +379,7 @@ impl GridMapVisualizer {
         };
 
         GridMapColorMode::Colormapped(ColormapWithRange {
-            colormap,
+            colormap: component_data.colormap,
             value_range,
         })
     }

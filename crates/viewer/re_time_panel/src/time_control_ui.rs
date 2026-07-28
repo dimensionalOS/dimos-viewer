@@ -2,7 +2,7 @@ use egui::NumExt as _;
 use re_entity_db::EntityDb;
 use re_log_types::TimeType;
 use re_sdk_types::blueprint::components::{LoopMode, PlayState};
-use re_ui::{UICommand, UiExt as _, list_item};
+use re_ui::{RecordingCommandKind, UiExt as _, list_item};
 use re_viewer_context::{TimeControl, TimeControlCommand};
 
 #[derive(serde::Deserialize, serde::Serialize, Default)]
@@ -65,9 +65,9 @@ Select timeline.
 
 Each piece of logged data is associated with one or more timelines.
 
-The logging SDK always creates two timelines for you:
-* `log_tick` - a sequence timeline with the sequence number of the log call
-* `log_time` - a temporal timeline with the time of the log call
+The logging SDK can create two timelines for you automatically:
+* `log_time` - a temporal timeline with the time of the log call (opt-out)
+* `log_tick` - a sequence timeline with the sequence number of the log call (opt-in)
 
 You can also define your own timelines, e.g. for sensor time or camera frame number.
 "
@@ -161,7 +161,7 @@ You can also define your own timelines, e.g. for sensor time or camera frame num
         let is_playing = time_ctrl.play_state() == PlayState::Playing;
         if ui
             .large_button_selected(&re_ui::icons::PLAY, is_playing)
-            .on_hover_ui(|ui| UICommand::PlaybackTogglePlayPause.tooltip_ui(ui))
+            .on_hover_ui(|ui| RecordingCommandKind::PlaybackTogglePlayPause.tooltip_ui(ui))
             .clicked()
         {
             if matches!(time_ctrl.play_state(), PlayState::Playing) {
@@ -182,7 +182,7 @@ You can also define your own timelines, e.g. for sensor time or camera frame num
         let is_following = time_ctrl.play_state() == PlayState::Following;
         if ui
             .large_button_selected(&re_ui::icons::FOLLOW, is_following)
-            .on_hover_ui(|ui| UICommand::PlaybackFollow.tooltip_ui(ui))
+            .on_hover_ui(|ui| RecordingCommandKind::PlaybackFollow.tooltip_ui(ui))
             .clicked()
         {
             time_commands.push(TimeControlCommand::SetPlayState(PlayState::Following));
@@ -199,7 +199,7 @@ You can also define your own timelines, e.g. for sensor time or camera frame num
         let is_paused = time_ctrl.play_state() == PlayState::Paused;
         if ui
             .large_button_selected(&re_ui::icons::PAUSE, is_paused)
-            .on_hover_ui(|ui| UICommand::PlaybackTogglePlayPause.tooltip_ui(ui))
+            .on_hover_ui(|ui| RecordingCommandKind::PlaybackTogglePlayPause.tooltip_ui(ui))
             .clicked()
         {
             time_commands.push(TimeControlCommand::TogglePlayPause);
@@ -210,7 +210,7 @@ You can also define your own timelines, e.g. for sensor time or camera frame num
     fn step_time_button_ui(&self, ui: &mut egui::Ui, time_commands: &mut Vec<TimeControlCommand>) {
         if ui
             .large_button(&re_ui::icons::ARROW_LEFT)
-            .on_hover_ui(|ui| UICommand::PlaybackStepBack.tooltip_ui(ui))
+            .on_hover_ui(|ui| RecordingCommandKind::PlaybackStepBack.tooltip_ui(ui))
             .clicked()
         {
             time_commands.push(TimeControlCommand::StepTimeBack);
@@ -218,7 +218,7 @@ You can also define your own timelines, e.g. for sensor time or camera frame num
 
         if ui
             .large_button(&re_ui::icons::ARROW_RIGHT)
-            .on_hover_ui(|ui| UICommand::PlaybackStepForward.tooltip_ui(ui))
+            .on_hover_ui(|ui| RecordingCommandKind::PlaybackStepForward.tooltip_ui(ui))
             .clicked()
         {
             time_commands.push(TimeControlCommand::StepTimeForward);
@@ -253,7 +253,14 @@ You can also define your own timelines, e.g. for sensor time or camera frame num
                         .on_hover_text("Looping entire recording")
                         .clicked()
                     {
-                        time_commands.push(TimeControlCommand::SetLoopMode(LoopMode::Selection));
+                        // Only go to the selection time selection mode if there's already a selection.
+                        // (otherwise, we'd create a selection as a fail-safe, but that's rather confusing!)
+                        if time_ctrl.time_selection().is_some() {
+                            time_commands
+                                .push(TimeControlCommand::SetLoopMode(LoopMode::Selection));
+                        } else {
+                            time_commands.push(TimeControlCommand::SetLoopMode(LoopMode::Off));
+                        }
                     }
                 }
                 LoopMode::Selection => {

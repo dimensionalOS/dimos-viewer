@@ -14,16 +14,20 @@ atexit.register(lambda: shutil.rmtree(TMP_DIR) if TMP_DIR.exists() else None)
 
 from pathlib import Path
 
-from lerobot.datasets.lerobot_dataset import LeRobotDataset  # type: ignore[import-untyped,import-not-found]
-from rerun_export.lerobot.converter import convert_dataframe_to_episode
-from rerun_export.lerobot.feature_inference import infer_features
-from rerun_export.lerobot.types import LeRobotConversionConfig, VideoSpec
+from lerobot.datasets.lerobot_dataset import (
+    LeRobotDataset,  # type: ignore[import-untyped,import-not-found]
+)
+from rerun_lerobot.converter import convert_dataframe_to_episode
+from rerun_lerobot.feature_inference import infer_features
+from rerun_lerobot.types import LeRobotConversionConfig, VideoSpec
 
 import rerun as rr
 
 # Start a server with RRD recordings
 # In practice, you would point this to your directory of RRD files
-sample_5_path = Path(__file__).parents[4] / "tests" / "assets" / "rrd" / "sample_5"
+sample_5_path = (
+    Path(__file__).parents[4] / "tests" / "assets" / "rrd" / "sample_5"
+)
 
 server = rr.server.Server(datasets={"robot_dataset": sample_5_path})
 client = server.client()
@@ -59,8 +63,9 @@ training_data = (
 # For this example, we assume a static instruction
 instructions = "/language_instruction:TextDocument:text"
 
-# Specify video streams to include in the dataset
-# Each stream needs a key (camera identifier) and entity path where the VideoStream is logged
+# Specify video streams to include in the dataset.
+# Each stream needs a key (camera identifier) and entity path where the
+# VideoStream is logged
 videos = [
     VideoSpec(key="ext1", path="/camera/ext1", video_format="h264"),
     VideoSpec(key="ext2", path="/camera/ext2", video_format="h264"),
@@ -70,10 +75,12 @@ videos = [
 # Configure the conversion parameters
 # This maps Rerun's flexible data model to LeRobot's standardized format
 config = LeRobotConversionConfig(
-    fps=15,  # Target framerate for the dataset
+    fps=15,  # Target frame rate for the dataset
     index_column="real_time",  # Timeline to use for alignment
-    action="/action/joint_positions:Scalars:scalars",  # Fully qualified action column
-    state="/observation/joint_positions:Scalars:scalars",  # Fully qualified state column
+    # Fully qualified action column
+    action="/action/joint_positions:Scalars:scalars",
+    # Fully qualified state column
+    state="/observation/joint_positions:Scalars:scalars",
     task=instructions,  # Task description column
     videos=videos,  # Video streams to include
 )
@@ -102,7 +109,7 @@ lerobot_dataset = LeRobotDataset.create(
 
 # region: export_episode
 # Convert the recording to a LeRobot episode
-# This aligns all time series to the target framerate, extracts video frames,
+# This aligns all time series to the target frame rate, extracts video frames,
 # and writes the episode data in LeRobot's Parquet format
 print("Creating episode")
 

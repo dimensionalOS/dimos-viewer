@@ -6,7 +6,7 @@ use re_video::{DecodeHardwareAcceleration, DecodeSettings};
 const MAPBOX_ACCESS_TOKEN_ENV_VAR: &str = "RERUN_MAPBOX_ACCESS_TOKEN";
 
 /// Global options for the viewer.
-#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(default)]
 pub struct AppOptions {
     /// Experimental feature flags.
@@ -22,6 +22,9 @@ pub struct AppOptions {
     ///
     /// If false, you can still view them in the notifications panel.
     pub show_notification_toasts: bool,
+
+    /// Use Rerun's custom window decorations instead of the native OS decorations.
+    pub custom_window_decorations: bool,
 
     /// Include the "Welcome screen" application in the recordings panel?
     #[serde(alias = "include_welcome_screen_button_in_recordings_panel")]
@@ -86,6 +89,8 @@ impl Default for AppOptions {
 
             show_notification_toasts: true,
 
+            custom_window_decorations: re_ui::custom_window_decorations_default(),
+
             include_rerun_examples_button_in_recordings_panel: true,
 
             show_picking_debug_overlay: false,
@@ -102,12 +107,7 @@ impl Default for AppOptions {
 
             mapbox_access_token: String::new(),
 
-            memory_limit: if cfg!(target_arch = "wasm32") {
-                // On wasm32 we only have 4GB of memory to play around with.
-                re_memory::MemoryLimit::from_bytes(2_500_000_000)
-            } else {
-                MemoryLimit::from_fraction_of_total(0.75)
-            },
+            memory_limit: MemoryLimit::default_for_current_platform(),
 
             max_fetch_stage: FetchStage::default(),
 
@@ -122,6 +122,8 @@ impl AppOptions {
         Self {
             memory_limit: MemoryLimit::UNLIMITED,
             show_metrics: false, // flaky in snapshot tests
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            custom_window_decorations: false,
             ..Default::default()
         }
     }
@@ -164,7 +166,7 @@ impl AppOptions {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(default)]
 pub struct VideoOptions {
     /// Preferred method for video decoding on web.
@@ -187,15 +189,29 @@ pub struct VideoOptions {
     pub ffmpeg_path: String,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize, Clone)]
 #[serde(default)]
 pub struct ExperimentalAppOptions {
-    /// Enable the experimental Status view.
-    pub enable_status_view: bool,
-
-    /// Enable grid view mode for data tables.
+    /// Enable table cards and blueprints.
     ///
-    /// When enabled, a list/grid toggle appears in the table title bar,
-    /// allowing users to switch between the traditional table and a card-based grid layout.
-    pub table_grid_view: bool,
+    /// This enables registered table blueprints,
+    /// plus the table/grid view toggle for card-based table layouts.
+    pub table_cards_and_blueprints: bool,
+
+    /// Enable gamepad navigation in 3D spatial views.
+    pub gamepad_navigation: bool,
+
+    /// Enable alpha-blending of semi-transparent point clouds.
+    ///
+    /// Off by default: transparent point clouds are sorted on the CPU every frame, which is
+    /// slow for large clouds. Opaque point clouds render much faster.
+    pub point_cloud_transparency: bool,
+
+    /// Load `.rrd` files through the Viewer's in-process catalog instead of importing them
+    /// as a live recording.
+    ///
+    /// When enabled, opened `.rrd` files are registered with the catalog and surfaced as redap
+    /// datasets under an internal server in the recording panel. When disabled, files are imported
+    /// directly into the viewer as plain recordings.
+    pub use_internal_catalog: bool,
 }
