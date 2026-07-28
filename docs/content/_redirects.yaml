@@ -121,3 +121,7 @@ howto/extend/extend-ui: howto/visualization/extend-ui
 # Howto - train section moves
 howto/integrations/dataloader: howto/train/dataloader
 howto/query-and-transform/lerobot_export: howto/train/lerobot_export
+
+# Status renamed to State (8d4bb20945)
+reference/types/archetypes/status: reference/types/archetypes/state_change
+reference/types/views/status_view: reference/types/views/state_timeline_view

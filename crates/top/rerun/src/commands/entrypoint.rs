@@ -2175,6 +2175,7 @@ fn run_impl_with_wrapper(
         }
     }
 }
+
 /// Like `start_native_viewer` but wraps the App via `app_wrapper` if provided.
 ///
 /// Kept in sync with `start_native_viewer`; the only differences are the
