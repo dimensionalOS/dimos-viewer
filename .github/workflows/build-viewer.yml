@@ -8,6 +8,13 @@
 #   - GitHub Artifacts instead of GCS for wheel storage
 #   - Trusted publisher (OIDC) for PyPI instead of API token
 #
+# Wheel layout:
+#   `dimos-viewer` is a plain binary that links no Python (`cargo tree -p dimos-viewer -i pyo3`
+#   finds nothing), so one `py3-none-<platform>` wheel per platform serves every supported
+#   CPython version. The wheel is built once per platform and then install-tested on every
+#   Python version listed in the `test-wheel` matrix (keep that list and the
+#   `Programming Language :: Python :: 3.x` classifiers in `dimos/pyproject.toml` in sync).
+#
 # Triggers:
 #   PR → main          build + test
 #   push → main        build + test
@@ -36,7 +43,10 @@ defaults:
     shell: bash --noprofile --norc -euo pipefail {0}
 
 env:
-  PYTHON_VERSION: "3.10"
+  # Interpreter used to drive `maturin build`. It does not affect the wheel contents: the binary
+  # links no Python, and the wheel is retagged to `py3-none` after the build (see below).
+  BUILD_PYTHON_VERSION: "3.14"
+  BUILD_PYTHON_TAG: cp314-cp314
   PACKAGE_DIR: dimos
 
 # ---------------------------------------------------------------------------
@@ -78,12 +88,12 @@ jobs:
       - run: cargo test  -p dimos-viewer
 
   # -------------------------------------------------------------------
-  # 2. Build wheels per platform
+  # 2. Build one universal (py3-none) wheel per platform
   #    Linux: manylinux_2_28 container with Rerun's exact deps
   #    macOS: native runner
   # -------------------------------------------------------------------
   build-wheel:
-    name: Build wheel (${{ matrix.platform }}-py${{ matrix.python-version }})
+    name: Build wheel (${{ matrix.platform }})
     needs: [check]
     timeout-minutes: 60
     strategy:
@@ -91,64 +101,16 @@ jobs:
       matrix:
         include:
           - platform: linux-x64
-            python-version: "3.10"
-            python-tag: cp310-cp310
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            container: quay.io/pypa/manylinux_2_28_x86_64
-            compatibility: manylinux_2_28
-          - platform: linux-x64
-            python-version: "3.11"
-            python-tag: cp311-cp311
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            container: quay.io/pypa/manylinux_2_28_x86_64
-            compatibility: manylinux_2_28
-          - platform: linux-x64
-            python-version: "3.12"
-            python-tag: cp312-cp312
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             container: quay.io/pypa/manylinux_2_28_x86_64
             compatibility: manylinux_2_28
           - platform: linux-arm64
-            python-version: "3.10"
-            python-tag: cp310-cp310
-            os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            container: quay.io/pypa/manylinux_2_28_aarch64
-            compatibility: manylinux_2_28
-          - platform: linux-arm64
-            python-version: "3.11"
-            python-tag: cp311-cp311
-            os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            container: quay.io/pypa/manylinux_2_28_aarch64
-            compatibility: manylinux_2_28
-          - platform: linux-arm64
-            python-version: "3.12"
-            python-tag: cp312-cp312
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             container: quay.io/pypa/manylinux_2_28_aarch64
             compatibility: manylinux_2_28
           - platform: macos-arm64
-            python-version: "3.10"
-            python-tag: cp310-cp310
-            os: macos-14
-            target: aarch64-apple-darwin
-            container: ""
-            compatibility: ""
-          - platform: macos-arm64
-            python-version: "3.11"
-            python-tag: cp311-cp311
-            os: macos-14
-            target: aarch64-apple-darwin
-            container: ""
-            compatibility: ""
-          - platform: macos-arm64
-            python-version: "3.12"
-            python-tag: cp312-cp312
             os: macos-14
             target: aarch64-apple-darwin
             container: ""
@@ -201,9 +163,9 @@ jobs:
       - name: Install maturin (manylinux)
         if: matrix.container != ''
         run: |
-          /opt/python/${{ matrix.python-tag }}/bin/python3 -m pip install --upgrade pip
-          /opt/python/${{ matrix.python-tag }}/bin/python3 -m pip install maturin>=1.8.1
-          echo "/opt/python/${{ matrix.python-tag }}/bin" >> "$GITHUB_PATH"
+          /opt/python/${{ env.BUILD_PYTHON_TAG }}/bin/python3 -m pip install --upgrade pip
+          /opt/python/${{ env.BUILD_PYTHON_TAG }}/bin/python3 -m pip install "maturin>=1.8.1" wheel
+          echo "/opt/python/${{ env.BUILD_PYTHON_TAG }}/bin" >> "$GITHUB_PATH"
 
       - name: Build wheel (manylinux)
         if: matrix.container != ''
@@ -226,12 +188,12 @@ jobs:
         if: matrix.container == ''
         uses: actions/setup-python@v5
         with:
-          python-version: "${{ matrix.python-version }}"
+          python-version: "${{ env.BUILD_PYTHON_VERSION }}"
 
       - name: Install maturin (macOS)
         if: matrix.container == ''
         run: |
-          python3 -m pip install maturin>=1.8.1
+          python3 -m pip install "maturin>=1.8.1" wheel
 
       - name: Build wheel (macOS)
         if: matrix.container == ''
@@ -243,14 +205,30 @@ jobs:
             --out dist/
 
       # --- Common ---
+      - name: Retag wheel as py3-none
+        run: |
+          # maturin tags the wheel `cpXY-cpXY` for the interpreter it was built with, because
+          # `cargo metadata` unifies features across the whole workspace: `rerun_py` enables
+          # `re_protos/py`, which makes `pyo3` look like an indirect dependency of `dimos-viewer`
+          # even though the binary never links it. The wheel contents are identical for every
+          # interpreter, so retag it to the universal `py3-none` tag.
+          python3 -m wheel tags --python-tag py3 --abi-tag none --remove dist/*.whl
+          ls -la dist/
+          for whl in dist/*.whl; do
+            case "$(basename "$whl")" in
+              *-py3-none-*.whl) ;;
+              *) echo "::error::Unexpected wheel tag: $whl"; exit 1 ;;
+            esac
+          done
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.platform }}-py${{ matrix.python-version }}
+          name: wheel-${{ matrix.platform }}
           path: dist/*.whl
 
   # -------------------------------------------------------------------
-  # 3. Test installed wheels (x64 + arm64)
+  # 3. Install-test the Linux wheels on every supported Python (x64 + arm64)
   # -------------------------------------------------------------------
   test-wheel:
     name: Test wheel (${{ matrix.arch }}-py${{ matrix.python-version }})
@@ -259,25 +237,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+        arch: [x64, arm64]
         include:
-          - python-version: "3.10"
+          - arch: x64
             os: ubuntu-22.04
-            arch: x64
-          - python-version: "3.11"
-            os: ubuntu-22.04
-            arch: x64
-          - python-version: "3.12"
-            os: ubuntu-22.04
-            arch: x64
-          - python-version: "3.10"
+          - arch: arm64
             os: ubuntu-22.04-arm
-            arch: arm64
-          - python-version: "3.11"
-            os: ubuntu-22.04-arm
-            arch: arm64
-          - python-version: "3.12"
-            os: ubuntu-22.04-arm
-            arch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -285,11 +251,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "${{ matrix.python-version }}"
+          allow-prereleases: true
 
       - name: Download wheel
         uses: actions/download-artifact@v4
         with:
-          name: wheel-linux-${{ matrix.arch }}-py${{ matrix.python-version }}
+          name: wheel-linux-${{ matrix.arch }}
           path: dist/
 
       - name: Install wheel
