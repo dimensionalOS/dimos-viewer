@@ -46,7 +46,7 @@ env:
   # Interpreter used to drive `maturin build`. It does not affect the wheel contents: the binary
   # links no Python, and the wheel is retagged to `py3-none` after the build (see below).
   BUILD_PYTHON_VERSION: "3.14"
-  BUILD_PYTHON_TAG: cp312-cp312
+  BUILD_PYTHON_TAG: cp314-cp314
   PACKAGE_DIR: dimos
 
 # ---------------------------------------------------------------------------
