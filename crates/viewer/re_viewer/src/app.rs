@@ -2574,6 +2574,17 @@ impl App {
 
         let start = web_time::Instant::now();
 
+        // Ingest for at most 10 ms per frame so the UI stays responsive. When frames are rare,
+        // because the window is not being presented (a blanked display makes the NVIDIA driver
+        // throttle presents to about one per second), 10 ms per frame cannot keep up with a
+        // live stream and the viewer falls minutes behind. Nobody is looking at the UI then, so
+        // spend up to a quarter of the frame interval ingesting instead.
+        let frame_interval = web_time::Duration::from_secs_f32(egui_ctx.input(|i| i.unstable_dt));
+        let budget = (frame_interval / 4).clamp(
+            web_time::Duration::from_millis(10),
+            web_time::Duration::from_millis(250),
+        );
+
         while let Some((channel_source, msg)) = self.rx_log.try_recv() {
             re_log::trace!("Received a message from {channel_source:?}"); // Used by `test_ui_wakeup` test app!
 
@@ -2656,7 +2667,7 @@ impl App {
                 self.on_new_store(egui_ctx, sid, &channel_source, store_hub);
             }
 
-            if start.elapsed() > web_time::Duration::from_millis(10) {
+            if start.elapsed() > budget {
                 egui_ctx.request_repaint(); // make sure we keep receiving messages asap
                 break; // don't block the main thread for too long
             }
